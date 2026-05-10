@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spark Smoke</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #180f0d;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from "three";
+      import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x180f0d);
+      const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.02, 50);
+      camera.position.set(0, 1.45, 0);
+      camera.lookAt(0, 1.45, -1.4);
+      const renderer = new THREE.WebGLRenderer({ antialias: false });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      document.body.appendChild(renderer.domElement);
+
+      const spark = new SparkRenderer({ renderer });
+      spark.frustumCulled = false;
+      scene.add(spark);
+
+      const splat = new SplatMesh({});
+      const center = new THREE.Vector3();
+      const scales = new THREE.Vector3(0.07, 0.07, 0.07);
+      const quat = new THREE.Quaternion(0, 0, 0, 1);
+      const color = new THREE.Color(1, 0.12, 0.02);
+      for (let index = 0; index < 900; index += 1) {
+        center.set((Math.random() - 0.5) * 1.2, 1.45 + (Math.random() - 0.5) * 0.7, -1.2 + (Math.random() - 0.5) * 0.35);
+        splat.pushSplat(center, scales, quat, 1, color);
+      }
+      splat.frustumCulled = false;
+      scene.add(splat);
+
+      const box = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), new THREE.MeshBasicMaterial({ color: 0xffd58d }));
+      box.position.set(0, 1.45, -1.4);
+      scene.add(box);
+
+      window.__smoke = { scene, camera, renderer, spark, splat };
+      renderer.setAnimationLoop(() => {
+        box.rotation.x += 0.01;
+        box.rotation.y += 0.015;
+        renderer.render(scene, camera);
+      });
+    </script>
+  </body>
+</html>
