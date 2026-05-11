@@ -15,6 +15,7 @@ last_updated: "2026-05-09"
 - DOM overlays are reserved for pre-round selection, debugging, settings, technical recovery, and post-round receipts.
 - Mandarin is the default surface. English or pinyin appears only when a setting explicitly enables it.
 - Keep the cashier, counter, menu boards, drink, and reticle readable at all times.
+- Keep future scenario swaps in mind when it is cheap to do so: copy, vocabulary, menu boards, voice locale, and assets should be easier to replace later, but current boba demo polish wins over abstraction.
 
 # Tokens
 

@@ -215,7 +215,7 @@ main {
 .controls,
 .order-chip,
 .technical,
-.receipt-panel {
+.end-actions {
   position: fixed;
   z-index: 12;
 }
@@ -563,64 +563,45 @@ main {
   color: rgba(255, 245, 216, 0.88);
 }
 
-.receipt-panel {
-  inset: 0;
+.end-actions {
+  left: 18px;
+  bottom: 18px;
   display: grid;
-  grid-template-columns: minmax(280px, 420px) minmax(180px, 250px);
-  justify-content: center;
-  align-items: center;
-  gap: 18px;
-  padding: 24px;
-  background: rgba(31, 29, 15, 0.52);
-  backdrop-filter: blur(8px);
-}
-
-.receipt-card,
-.receipt-history {
+  gap: 8px;
+  width: max-content;
+  max-width: calc(100vw - 36px);
+  padding: 10px;
+  border: 1px solid rgba(241, 231, 200, 0.18);
   border-radius: 8px;
-  color: var(--deep-olive);
-  background: var(--cream);
-  box-shadow: 0 18px 70px rgba(0, 0, 0, 0.42);
+  background: rgba(48, 45, 24, 0.62);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 70px rgba(0, 0, 0, 0.32);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
 }
 
-.receipt-card {
-  padding: 22px;
+.end-actions--quiet {
+  opacity: 0.38;
+  transform: translateY(10px);
 }
 
-.receipt-title {
+.end-actions--quiet:hover,
+.end-actions--quiet:focus-within {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.end-actions button {
+  padding: 9px 11px;
+  font-size: 13px;
+}
+
+.share-status {
   display: block;
-  color: var(--old-gold);
-  font-weight: 900;
-  margin-bottom: 6px;
-}
-
-.receipt-score {
-  display: block;
-  font-size: 54px;
-  line-height: 1;
-  margin-bottom: 12px;
-}
-
-.receipt-card p {
-  margin: 8px 0;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed rgba(132, 111, 24, 0.3);
-}
-
-.receipt-history {
-  padding: 18px;
-  display: grid;
-  gap: 10px;
-  align-self: center;
-}
-
-.receipt-history span {
-  color: var(--old-gold);
-  font-weight: 900;
-}
-
-.receipt-history small {
-  color: #5d5526;
+  color: rgba(255, 245, 216, 0.78);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .vr-button {
@@ -686,8 +667,10 @@ main {
     display: none;
   }
 
-  .receipt-panel {
-    grid-template-columns: 1fr;
-    overflow: auto;
+  .end-actions {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
   }
 }

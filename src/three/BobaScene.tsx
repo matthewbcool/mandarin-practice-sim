@@ -4,9 +4,9 @@ import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
 import { describeOrder } from "../game/menu";
-import type { GamePhase, Order } from "../game/types";
+import type { GamePhase, Order, Receipt } from "../game/types";
 
-export type FocusTarget = "cashier" | "line" | "none";
+export type FocusTarget = "cashier" | "line" | "receipt" | "none";
 export interface CashierPoseTuning {
   rootY: number;
   rootZ: number;
@@ -48,6 +48,7 @@ interface BobaSceneProps {
   playerSpeechText: string;
   pressure: number;
   currentOrder: Order;
+  receipt?: Receipt;
   cashierPose: CashierPoseTuning;
   onFocusTargetChange: (target: FocusTarget) => void;
 }
@@ -58,6 +59,7 @@ const CASHIER_URL = "/assets/characters/aki/aki-cashier.glb";
 const CUSTOMER_URL = "/assets/characters/universal-base/Superhero_Male_FullBody.gltf";
 const CASHIER_POS: [number, number, number] = [0, 0.097, -2];
 const CASHIER_SCALE = 0.99;
+const RECEIPT_GAZE_FOCUS_SECONDS = 0.9;
 export const DEFAULT_CASHIER_POSE: CashierPoseTuning = {
   rootY: 0,
   rootZ: 0,
@@ -180,6 +182,13 @@ export default function BobaScene(props: BobaSceneProps) {
     drink.position.set(0.58, 0.86, -0.88);
     drink.visible = false;
     scene.add(drink);
+
+    const receiptDisplay = createReceiptDisplay();
+    scene.add(receiptDisplay.group);
+    focusObjects.push(receiptDisplay.hitArea);
+
+    const confetti = createConfettiBurst();
+    scene.add(confetti.group);
 
     const exclamation = createTextSprite("！");
     exclamation.position.set(0, 1.72, -1.42);
@@ -374,6 +383,18 @@ export default function BobaScene(props: BobaSceneProps) {
     let lastPressureText = "";
     let lastSpeechText = "";
     let lastSpeechTitle = "";
+    let lastReceiptId = "";
+    let wasCelebrating = false;
+    let receiptFocused = false;
+    let receiptGazeStartedAt = -1;
+    let receiptFocusAmount = 0;
+    const counterDrinkPosition = new THREE.Vector3(0.58, 0.86, -0.88);
+    const celebrationDrinkPosition = new THREE.Vector3(0, 1.08, -0.72);
+    const receiptDrinkPosition = new THREE.Vector3(0, 1.08, -0.72);
+    const receiptSidePosition = new THREE.Vector3(0.46, 1.18, -0.78);
+    const receiptFocusedPosition = new THREE.Vector3();
+    const receiptForward = new THREE.Vector3();
+    const receiptSideQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -0.16, 0.018));
 
     const onResize = () => {
       const width = mount.clientWidth;
@@ -392,18 +413,52 @@ export default function BobaScene(props: BobaSceneProps) {
     };
     window.addEventListener("keydown", onKeyDown);
 
+    const onPointerUp = () => {
+      if (propsRef.current.phase === "receipt" && lastFocusTarget === "receipt") {
+        receiptFocused = true;
+      }
+    };
+    renderer.domElement.addEventListener("pointerup", onPointerUp);
+
     renderer.setAnimationLoop(() => {
       const elapsed = clock.getElapsedTime();
       const state = propsRef.current;
+      const receiptVisible = state.phase === "receipt" && Boolean(state.receipt);
+      receiptDisplay.hitArea.visible = receiptVisible;
       lookControls.update();
 
       raycaster.setFromCamera(center, camera);
       const intersects = raycaster.intersectObjects(focusObjects, true);
-      const target = (intersects[0]?.object.userData.focusTarget as FocusTarget | undefined) ?? "none";
+      const focusHit = intersects.find((hit) => {
+        const focus = hit.object.userData.focusTarget as FocusTarget | undefined;
+        return focus !== "receipt" || receiptVisible;
+      });
+      const target = (focusHit?.object.userData.focusTarget as FocusTarget | undefined) ?? "none";
       if (target !== lastFocusTarget) {
         lastFocusTarget = target;
         propsRef.current.onFocusTargetChange(target);
       }
+
+      const receiptId = receiptVisible ? state.receipt?.id ?? "" : "";
+      if (receiptId !== lastReceiptId) {
+        lastReceiptId = receiptId;
+        receiptFocused = false;
+        receiptGazeStartedAt = -1;
+        receiptFocusAmount = 0;
+        if (state.receipt) receiptDisplay.update(state.receipt);
+      }
+      if (!receiptVisible) {
+        receiptFocused = false;
+        receiptGazeStartedAt = -1;
+      } else if (!receiptFocused && target === "receipt") {
+        if (receiptGazeStartedAt < 0) receiptGazeStartedAt = elapsed;
+        if (elapsed - receiptGazeStartedAt >= RECEIPT_GAZE_FOCUS_SECONDS) {
+          receiptFocused = true;
+        }
+      } else if (target !== "receipt") {
+        receiptGazeStartedAt = -1;
+      }
+      receiptFocusAmount = THREE.MathUtils.lerp(receiptFocusAmount, receiptFocused ? 1 : 0, 0.08);
 
       if (cashierRoot) {
         const speakingBob = state.npcSpeaking ? Math.sin(elapsed * 18) * 0.012 : Math.sin(elapsed * 2.3) * 0.006;
@@ -421,8 +476,36 @@ export default function BobaScene(props: BobaSceneProps) {
 
       exclamation.visible = target === "cashier" && state.listening;
       exclamation.scale.setScalar(0.34 + Math.sin(elapsed * 7) * 0.03);
-      drink.visible = state.phase === "serving" || state.phase === "receipt";
-      drink.rotation.y = Math.sin(elapsed * 1.2) * 0.16;
+      const celebrating = state.phase === "serving";
+      if (celebrating && !wasCelebrating) confetti.start(elapsed);
+      wasCelebrating = celebrating;
+      confetti.update(elapsed);
+
+      const drinkVisible = celebrating || receiptVisible;
+      const drinkOpacity = receiptVisible ? 1 - receiptFocusAmount : 1;
+      drink.visible = drinkVisible && drinkOpacity > 0.03;
+      const targetDrinkPosition = celebrating ? celebrationDrinkPosition : receiptVisible ? receiptDrinkPosition : counterDrinkPosition;
+      drink.position.lerp(targetDrinkPosition, 0.22);
+      const receiptDrinkScale = THREE.MathUtils.lerp(1.42, 0.92, receiptFocusAmount);
+      drink.scale.setScalar(celebrating ? 1.72 + Math.sin(elapsed * 5.5) * 0.035 : receiptVisible ? receiptDrinkScale : 1.1);
+      drink.rotation.y = celebrating ? elapsed * 1.6 : receiptVisible ? Math.sin(elapsed * 1.2) * 0.08 : Math.sin(elapsed * 1.2) * 0.16;
+      drink.rotation.z = celebrating ? Math.sin(elapsed * 4.2) * 0.035 : 0;
+      setObjectOpacity(drink, drinkOpacity);
+
+      receiptDisplay.group.visible = receiptVisible;
+      if (receiptVisible) {
+        camera.getWorldDirection(receiptForward);
+        receiptFocusedPosition.copy(camera.position).addScaledVector(receiptForward, 0.82);
+        receiptDisplay.group.position.lerpVectors(receiptSidePosition, receiptFocusedPosition, receiptFocusAmount);
+        const gazeProgress =
+          !receiptFocused && target === "receipt" && receiptGazeStartedAt >= 0
+            ? THREE.MathUtils.clamp((elapsed - receiptGazeStartedAt) / RECEIPT_GAZE_FOCUS_SECONDS, 0, 1)
+            : 0;
+        const receiptScale = THREE.MathUtils.lerp(0.76, 1.14, receiptFocusAmount) + gazeProgress * 0.025;
+        receiptDisplay.group.scale.setScalar(receiptScale);
+        receiptDisplay.group.quaternion.slerpQuaternions(receiptSideQuaternion, camera.quaternion, receiptFocusAmount);
+        receiptDisplay.setOpacity(THREE.MathUtils.lerp(0.92, 1, Math.max(receiptFocusAmount, gazeProgress)));
+      }
 
       const showGameplayPanels = ["ordering", "confirming", "paying", "serving"].includes(state.phase);
       npcBubble.sprite.visible = showGameplayPanels && Boolean(state.npcLine);
@@ -479,7 +562,10 @@ export default function BobaScene(props: BobaSceneProps) {
       renderer.setAnimationLoop(null);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKeyDown);
+      renderer.domElement.removeEventListener("pointerup", onPointerUp);
       lookControls.dispose();
+      confetti.dispose();
+      receiptDisplay.dispose();
       renderer.dispose();
       vrButton?.remove();
       mount.removeChild(renderer.domElement);
@@ -1148,6 +1234,86 @@ function createDrinkPreview(): THREE.Group {
   return group;
 }
 
+function createConfettiBurst() {
+  const group = new THREE.Group();
+  group.visible = false;
+  group.position.set(0, 1.14, -0.72);
+
+  const geometry = new THREE.PlaneGeometry(0.024, 0.055);
+  const palette = [0xf1e7c8, 0xb8c98f, 0x9fb88f, 0x846f18, 0xbd7659, 0xffd88a];
+  const pieces: Array<{
+    mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+    origin: THREE.Vector3;
+    velocity: THREE.Vector3;
+    spin: THREE.Vector3;
+    delay: number;
+  }> = [];
+
+  for (let index = 0; index < 84; index += 1) {
+    const material = new THREE.MeshBasicMaterial({
+      color: palette[index % palette.length],
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+      depthTest: false,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 130;
+    group.add(mesh);
+
+    const angle = seededNoise(index, 3.1) * Math.PI * 2;
+    const radius = 0.16 + seededNoise(index, 5.2) * 0.42;
+    pieces.push({
+      mesh,
+      origin: new THREE.Vector3((seededNoise(index, 0.7) - 0.5) * 0.18, (seededNoise(index, 1.4) - 0.5) * 0.08, 0),
+      velocity: new THREE.Vector3(Math.cos(angle) * radius, 0.55 + seededNoise(index, 2.6) * 0.44, Math.sin(angle) * radius * 0.28),
+      spin: new THREE.Vector3(4 + seededNoise(index, 7.8) * 9, 3 + seededNoise(index, 8.9) * 7, 5 + seededNoise(index, 9.6) * 12),
+      delay: seededNoise(index, 4.3) * 0.3,
+    });
+  }
+
+  let startedAt = -Infinity;
+  let active = false;
+
+  return {
+    group,
+    start(now: number) {
+      active = true;
+      startedAt = now;
+      group.visible = true;
+      pieces.forEach((piece) => {
+        piece.mesh.visible = true;
+        piece.mesh.material.opacity = 1;
+      });
+    },
+    update(now: number) {
+      if (!active) return;
+      const elapsed = now - startedAt;
+      if (elapsed > 3.8) {
+        active = false;
+        group.visible = false;
+        return;
+      }
+
+      pieces.forEach((piece, index) => {
+        const t = Math.max(0, elapsed - piece.delay);
+        piece.mesh.visible = t > 0;
+        if (t <= 0) return;
+
+        piece.mesh.position.copy(piece.origin).addScaledVector(piece.velocity, t);
+        piece.mesh.position.y -= 0.34 * t * t;
+        piece.mesh.rotation.set(piece.spin.x * t, piece.spin.y * t, piece.spin.z * t + index);
+        piece.mesh.material.opacity = THREE.MathUtils.clamp(1 - Math.max(0, t - 1.7) / 1.6, 0, 1);
+      });
+    },
+    dispose() {
+      geometry.dispose();
+      pieces.forEach((piece) => piece.mesh.material.dispose());
+    },
+  };
+}
+
 function createTextSprite(text: string): THREE.Sprite {
   const canvas = document.createElement("canvas");
   canvas.width = 512;
@@ -1171,6 +1337,204 @@ function createTextSprite(text: string): THREE.Sprite {
   sprite.renderOrder = 90;
   sprite.scale.set(0.62, 0.31, 1);
   return sprite;
+}
+
+function createReceiptDisplay() {
+  const group = new THREE.Group();
+  group.visible = false;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 768;
+  canvas.height = 1040;
+  const ctx = canvas.getContext("2d")!;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+
+  const receiptGeometry = new THREE.PlaneGeometry(0.48, 0.65);
+  const shadowGeometry = new THREE.PlaneGeometry(0.53, 0.7);
+  const hitGeometry = new THREE.PlaneGeometry(0.56, 0.74);
+
+  const shadowMaterial = new THREE.MeshBasicMaterial({
+    color: 0x120c08,
+    transparent: true,
+    opacity: 0.24,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+  });
+  const shadow = new THREE.Mesh(shadowGeometry, shadowMaterial);
+  shadow.position.set(0.018, -0.018, -0.012);
+  shadow.renderOrder = 70;
+
+  const receiptMaterial = new THREE.MeshStandardMaterial({
+    map: texture,
+    emissiveMap: texture,
+    emissive: 0xffffff,
+    emissiveIntensity: 0.04,
+    roughness: 0.72,
+    metalness: 0.01,
+    transparent: true,
+    opacity: 0.96,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4,
+  });
+  const receiptMesh = new THREE.Mesh(receiptGeometry, receiptMaterial);
+  receiptMesh.renderOrder = 80;
+
+  const hitArea = new THREE.Mesh(
+    hitGeometry,
+    new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  hitArea.position.z = 0.018;
+  hitArea.userData.focusTarget = "receipt";
+  hitArea.renderOrder = 82;
+
+  group.add(shadow, receiptMesh, hitArea);
+
+  const update = (receipt: Receipt) => {
+    drawReceiptTexture(ctx, receipt);
+    texture.needsUpdate = true;
+  };
+
+  update({
+    id: "placeholder",
+    mode: "arcade",
+    recognized: { quantity: 1, toppings: [] },
+    score: 0,
+    scoreParts: { correctness: 0, politeness: 0, smoothness: 0, clarity: 0 },
+    success: true,
+    lines: [],
+    createdAt: new Date().toISOString(),
+  });
+
+  return {
+    group,
+    hitArea,
+    update,
+    setOpacity(opacity: number) {
+      receiptMaterial.opacity = opacity;
+      shadowMaterial.opacity = 0.24 * opacity;
+    },
+    dispose() {
+      texture.dispose();
+      receiptGeometry.dispose();
+      shadowGeometry.dispose();
+      hitGeometry.dispose();
+      receiptMaterial.dispose();
+      shadowMaterial.dispose();
+      hitArea.material.dispose();
+    },
+  };
+}
+
+function drawReceiptTexture(ctx: CanvasRenderingContext2D, receipt: Receipt) {
+  const { width, height } = ctx.canvas;
+  ctx.clearRect(0, 0, width, height);
+
+  ctx.fillStyle = "#f1e7c8";
+  roundRect(ctx, 28, 20, width - 56, height - 40, 18);
+  ctx.fill();
+  ctx.fillStyle = "rgba(255, 245, 216, 0.58)";
+  roundRect(ctx, 52, 48, width - 104, height - 96, 12);
+  ctx.fill();
+
+  ctx.strokeStyle = "rgba(132, 111, 24, 0.28)";
+  ctx.lineWidth = 3;
+  ctx.setLineDash([16, 14]);
+  ctx.beginPath();
+  ctx.moveTo(62, 188);
+  ctx.lineTo(width - 62, 188);
+  ctx.moveTo(62, height - 172);
+  ctx.lineTo(width - 62, height - 172);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  drawReceiptPerforation(ctx, 36);
+  drawReceiptPerforation(ctx, height - 36);
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = "#302d18";
+  ctx.font = "900 54px system-ui, sans-serif";
+  ctx.fillText("珍奶快打", width / 2, 72);
+  ctx.fillStyle = "#846f18";
+  ctx.font = "800 26px system-ui, sans-serif";
+  ctx.fillText(receipt.mode === "arcade" ? "挑戰收據" : "自由練習收據", width / 2, 134);
+
+  ctx.fillStyle = "#302d18";
+  ctx.font = "950 152px system-ui, sans-serif";
+  ctx.fillText(String(receipt.score), width / 2, 218);
+  ctx.fillStyle = "#846f18";
+  ctx.font = "900 34px system-ui, sans-serif";
+  ctx.fillText("分", width / 2 + 118, 308);
+
+  const createdAt = new Date(receipt.createdAt).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
+  ctx.fillStyle = "rgba(48, 45, 24, 0.72)";
+  ctx.font = "750 24px system-ui, sans-serif";
+  ctx.fillText(createdAt, width / 2, 386);
+
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#302d18";
+  ctx.font = "800 31px system-ui, sans-serif";
+  let y = 456;
+  const detailBottom = height - 286;
+  receipt.lines.forEach((line) => {
+    if (y > detailBottom - 40) return;
+    const lines = wrapCanvasText(ctx, line, width - 148, 2);
+    lines.forEach((wrapped) => {
+      if (y > detailBottom - 40) return;
+      ctx.fillText(wrapped, 74, y);
+      y += 42;
+    });
+    y += 8;
+  });
+
+  const parts = [
+    ["正確", receipt.scoreParts.correctness, 60],
+    ["禮貌", receipt.scoreParts.politeness, 15],
+    ["順暢", receipt.scoreParts.smoothness, 15],
+    ["清楚", receipt.scoreParts.clarity, 10],
+  ] as const;
+  y = height - 154;
+  parts.forEach(([label, value, max], index) => {
+    const rowY = y + index * 28;
+    ctx.fillStyle = "rgba(48, 45, 24, 0.72)";
+    ctx.font = "780 20px system-ui, sans-serif";
+    ctx.fillText(label, 74, rowY);
+    ctx.fillStyle = "rgba(132, 111, 24, 0.18)";
+    roundRect(ctx, 152, rowY + 3, 430, 12, 6);
+    ctx.fill();
+    ctx.fillStyle = index % 2 === 0 ? "#9fb88f" : "#bd7659";
+    roundRect(ctx, 152, rowY + 3, 430 * Math.max(0, Math.min(1, value / max)), 12, 6);
+    ctx.fill();
+    ctx.fillStyle = "#302d18";
+    ctx.font = "800 20px system-ui, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(String(value), width - 74, rowY - 2);
+    ctx.textAlign = "left";
+  });
+}
+
+function drawReceiptPerforation(ctx: CanvasRenderingContext2D, y: number) {
+  ctx.save();
+  ctx.fillStyle = "#302d18";
+  ctx.globalAlpha = 0.14;
+  for (let x = 58; x < ctx.canvas.width - 54; x += 26) {
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function createDynamicPanelSprite(options: {
@@ -1264,6 +1628,21 @@ function hasOrderContent(order: Order): boolean {
       order.toppings.length ||
       order.quantity > 1,
   );
+}
+
+function setObjectOpacity(root: THREE.Object3D, opacity: number) {
+  root.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach((material) => {
+      if (!material) return;
+      const baseOpacity = typeof material.userData.baseOpacity === "number" ? material.userData.baseOpacity : material.opacity;
+      material.userData.baseOpacity = baseOpacity;
+      material.transparent = true;
+      material.opacity = baseOpacity * opacity;
+    });
+  });
 }
 
 function applyCashierRootPose(root: THREE.Object3D, tuning: CashierPoseTuning, bob = 0) {

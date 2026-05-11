@@ -1,6 +1,6 @@
 # 珍奶快打
 
-珍奶快打 is a first-person Taiwan Mandarin boba-ordering trainer for desktop browsers and Quest WebXR. The project is both a language-learning prototype and a WebXR/NVIDIA voice demo: players stand at a Taiwanese drink shop counter, listen to a target order, speak the order in Traditional Chinese, respond to cashier follow-ups, and receive a scored receipt.
+珍奶快打 is a first-person Taiwan Mandarin boba-ordering trainer for desktop browsers and Quest WebXR. The project is both a language-learning prototype and a realtime voice demo: players stand at a Taiwanese drink shop counter, listen to a target order, speak the order in Traditional Chinese, respond to cashier follow-ups, and receive a scored receipt.
 
 The package name, `boba-arcade-mandarin`, is only the internal English project code name. The user-facing product name is `珍奶快打`.
 
@@ -9,7 +9,7 @@ The package name, `boba-arcade-mandarin`, is only the internal English project c
 - Support desktop and Quest WebXR as equal first-class targets.
 - Keep live ordering UI available in the Three.js scene so it works in headset mode.
 - Use strict Taiwan Mandarin UX: Traditional Chinese text, `zh-TW` recognition, and Taiwanese drink-shop ordering vocabulary.
-- Demonstrate NVIDIA-powered speech and reasoning while keeping a browser fallback for local iteration.
+- Demonstrate fast Live API speech while keeping a browser fallback for local iteration.
 - Let scripted rounds define the target order, then move toward LLM-driven cashier interaction and pass/fail evaluation.
 
 ## Current Experience
@@ -26,8 +26,9 @@ During a round, the app listens by either gaze focus on the cashier or the manua
 - Vite 7, React 19, TypeScript
 - Three.js for the first-person scene and WebXR entry
 - `@sparkjsdev/spark` for Gaussian splat rendering
+- Gemini Live API for low-latency listening and spoken cashier lines
 - Browser speech APIs as a fallback for local testing
-- NVIDIA streaming ASR and Nemotron Omni proxy hooks for the target voice path
+- NVIDIA streaming ASR and Nemotron Omni proxy hooks retained for experiments
 
 ## Project Structure
 
@@ -35,6 +36,7 @@ During a round, the app listens by either gaze focus on the cashier or the manua
 .
 ├── DESIGN.md                 # UI and WebXR direction
 ├── README.md
+├── VIVE_FOCUS_TESTING.md     # HTC VIVE Focus headset testing notes
 ├── index.html
 ├── package.json
 ├── public/assets/
@@ -46,7 +48,7 @@ During a round, the app listens by either gaze focus on the cashier or the manua
     ├── game/                 # Menu data, rounds, parser, scoring, types
     ├── styles/app.css
     ├── three/BobaScene.tsx   # Spark/Three/WebXR scene and in-world panels
-    └── voice/                # Browser, NVIDIA streaming, and Omni voice providers
+    └── voice/                # Gemini Live, browser, NVIDIA streaming, and Omni voice providers
 ```
 
 ## Assets
@@ -87,9 +89,61 @@ npm run typecheck  # Run TypeScript without emitting files
 
 ## Voice Path
 
-`src/App.tsx` currently creates a `NvidiaStreamingSpeechVoiceProvider` with `BrowserMandarinVoiceProvider` as the fallback. The intended direction is NVIDIA-first speech, not browser speech long term.
+`src/App.tsx` currently creates a `GeminiLiveVoiceProvider` with `BrowserMandarinVoiceProvider` as the fallback. The current active direction is Gemini Live first, browser fallback second. The in-game requirement remains strict Taiwan Mandarin: Traditional Chinese, `zh-TW`, and Taiwanese drink-shop ordering vocabulary.
 
-The active streaming ASR target is:
+Set a local Gemini key before starting Vite:
+
+```sh
+GEMINI_API_KEY=... npm run dev
+# or put GEMINI_API_KEY in .env.local
+```
+
+The local Vite server exposes:
+
+- `GET /api/gemini/live/status`
+- `POST /api/gemini/live-token`
+- `POST /api/gemini/tts`
+
+The token route creates short-lived Gemini Live ephemeral tokens so the browser can connect to Gemini without exposing the real API key. Cashier/objective speech tries Gemini Live audio first, then uses the dedicated Gemini TTS route as a fallback or pre-render path for exact scripted lines. The default Live model is:
+
+```text
+gemini-3.1-flash-live-preview
+```
+
+Optional voice/model overrides:
+
+```sh
+GEMINI_LIVE_MODEL='gemini-3.1-flash-live-preview'
+GEMINI_TTS_MODEL='gemini-2.5-flash-preview-tts'
+VITE_GEMINI_CASHIER_VOICE='Aoede'
+VITE_GEMINI_ANNOUNCER_VOICE='Zephyr'
+VITE_GEMINI_SYSTEM_VOICE='Kore'
+```
+
+### Gemini API Notes
+
+Checked against the official Google AI Gemini docs in May 2026:
+
+- [Live API overview](https://ai.google.dev/gemini-api/docs/live-api): Gemini Live is the realtime path for this demo. It uses a stateful WebSocket and is designed for low-latency voice interactions, including game/NPC-style use cases. Keep the direct browser connection protected with ephemeral tokens, not a long-lived API key.
+- [Ephemeral tokens](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens): tokens are Live-only, short-lived credentials. The local `/api/gemini/live-token` route mints constrained tokens with `uses: 1`, a 1-minute new-session window, a 10-minute token lifetime, and model/config constraints so the browser never sees the real `GEMINI_API_KEY`.
+- [Live capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities): Live audio is raw little-endian 16-bit PCM. Send microphone chunks as `audio/pcm;rate=16000`; expect 24 kHz PCM output. `inputAudioTranscription` powers the player transcript, and `outputAudioTranscription` can power cashier subtitles.
+- Gemini 3.1 Flash Live can send multiple parts in one server event, so client code must iterate every `serverContent.modelTurn.parts` item when extracting audio. For text sent during a 3.1 Live session, use `sendRealtimeInput` after initial setup/history.
+- [Live session management](https://ai.google.dev/gemini-api/docs/live-api/session-management): without context compression, audio-only sessions are limited to 15 minutes, and individual WebSocket connections last around 10 minutes. The current demo opens short-lived listen/speak sessions per turn; longer freeplay should add session resumption and/or context window compression.
+- [Speech generation](https://ai.google.dev/gemini-api/docs/speech-generation): Gemini TTS is separate from Live. It is best for exact scripted line reads, accepts text-only input, returns audio-only output, uses 24 kHz PCM examples, and does not support streaming. Keep Live as the realtime cashier path and use TTS as a fallback or pre-render path.
+- Current Google docs list `gemini-3.1-flash-tts-preview` plus Gemini 2.5 preview TTS models. The project default remains `gemini-2.5-flash-preview-tts` until the newer 3.1 TTS voice quality is tested in the boba scene; use `GEMINI_TTS_MODEL` to audition it without changing code.
+- For future scenario swaps, keep language, locale, vocabulary, cashier persona, and TTS voice choice data-driven. Mandarin uses Traditional Chinese and `zh-TW`; a French bakery should swap to `fr-FR` and bakery-specific prompts without changing the voice architecture.
+
+For now, the app uses Gemini Live for:
+
+- player Mandarin speech transcription through `inputAudioTranscription`
+- strict prompt instructions for Traditional Chinese and Taiwan Mandarin
+- cashier/objective/system speech through Live API audio output
+
+And Gemini TTS only as a fallback/pre-render path:
+
+- exact scripted lines if Live audio output is unavailable
+
+Legacy NVIDIA streaming ASR target retained for experiments:
 
 - Model: `parakeet-ctc-0.6b-zh-tw`
 - Language: `zh-TW`
@@ -112,11 +166,11 @@ This project should optimize for the feeling of a live conversation at the count
 
 ```text
 player mic
-  -> NVIDIA streaming ASR
+  -> Gemini Live transcription
   -> local Taiwan boba parser
   -> deterministic order state update
   -> cashier response
-  -> streaming TTS
+  -> Gemini Live audio output
 ```
 
 The local parser in `src/game/parser.ts` is the first-pass intent engine. It should remain fast and deterministic for common order language: drink, quantity, size, sweetness, ice, toppings, corrections, confirmations, and politeness. If the parser can confidently update the order, the cashier should respond immediately without waiting for a cloud LLM.
@@ -128,7 +182,17 @@ Use an LLM only as a fallback or enrichment layer:
 - Evaluation: judge whether the interaction was fluent, polite, or required too many corrections.
 - Future multimodal use: Nemotron 3 Nano Omni can inspect audio/video/context for demo storytelling, but it should not be the main realtime ASR path.
 
-Target NVIDIA stack:
+Current Gemini target:
+
+- Live model: `gemini-3.1-flash-live-preview`.
+- TTS fallback model: `gemini-2.5-flash-preview-tts`.
+- Auth: local Vite ephemeral-token route, backed by `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+- Input audio: realtime Mandarin speech, 16 kHz PCM.
+- Player feedback: `inputAudioTranscription` feeds the bottom transcript and in-world VR transcript panel.
+- Output audio: Gemini Live audio, with `outputAudioTranscription` available for cashier subtitles.
+- Prompting: force Traditional Chinese, Taiwan Mandarin, and Taiwanese drink-shop phrasing.
+
+Legacy NVIDIA stack retained for experiments:
 
 - Streaming ASR: `parakeet-ctc-0.6b-zh-tw` through NVIDIA Speech/Riva NIM.
 - Fast order logic: local parser first.
@@ -144,7 +208,7 @@ For TTS, the requirement is “most Taiwanese-sounding,” not merely Mandarin. 
 - `Magpie-Multilingual.ZH-CN.Aria.Calm`
 - `Magpie-Multilingual.ZH-CN.Aria.Neutral`
 
-If none of the Magpie voices feel Taiwan-appropriate, keep browser TTS or another voice service as a temporary fallback, but preserve the NVIDIA-first architecture in code.
+If none of the Gemini voices feel Taiwan-appropriate, keep browser TTS or another voice service as a temporary fallback while preserving the Gemini Live abstraction in code.
 
 ### Brev/NIM Deployment Direction
 
@@ -223,6 +287,12 @@ Useful query parameters implemented by `BobaScene.tsx`:
 `DESIGN.md` is the source of truth for UI direction. The intended feel is an in-world arcade roleplay simulator, not a dashboard. Live ordering information should appear as small Three.js surfaces near the counter, while DOM overlays should stay limited to menus, settings, debug tools, technical recovery, and receipts.
 
 The visible menu boards in the scene are mainly aesthetic today and should be improved over time. The old pose debug sliders have been removed; the cashier now uses the baked `COUNTER_CASHIER_POSE`.
+
+## Future Scenario Abstraction
+
+The current priority is polishing the Taiwan boba ordering demo. When making new changes, keep the architecture friendly to future scenario swaps such as a French bakery or Spanish-language ordering environment. Prefer code that separates scenario-specific content from reusable interaction mechanics: vocabulary, menu items, rounds, cashier copy, locale, voice prompts, in-world menu board text, scoring labels, and asset URLs should gradually move toward configurable scenario data.
+
+Do not start a broad abstraction pass until the current demo is polished. Small opportunistic cleanup is welcome when it reduces hardcoded boba/Mandarin assumptions without adding complexity or risking the demo.
 
 ## Known Gaps
 

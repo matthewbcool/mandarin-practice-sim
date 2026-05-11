@@ -1,5 +1,6 @@
 export interface ListenCallbacks {
   onPartial?: (text: string) => void;
+  onVoiceStart?: () => void;
   onFinal: (text: string) => void;
   onError?: (message: string) => void;
   onStart?: () => void;
