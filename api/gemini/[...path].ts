@@ -1,7 +1,29 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 
 const ttsCache = new Map<string, Record<string, unknown>>();
 const ttsCacheLimit = 60;
+const voiceRoles = new Set(["cashier", "announcer", "system"]);
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+const requestLimits = {
+  bodyBytes: 256 * 1024,
+  transcriptChars: 1200,
+  ttsChars: 600,
+  rateWindowMs: 60_000,
+  requestsPerWindow: {
+    "live-token": 20,
+    "order-intent": 40,
+    tts: 25,
+  } as Record<string, number>,
+};
+
+class RequestError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
 export default async function handler(request: any, response: any) {
   const path = normalizePath(request.query?.path);
@@ -29,6 +51,18 @@ export default async function handler(request: any, response: any) {
     return;
   }
 
+  if (!isTrustedOrigin(request)) {
+    sendJson(response, 403, { error: "Blocked cross-origin Gemini request." });
+    return;
+  }
+
+  const rateLimit = consumeRateLimit(request, path);
+  if (!rateLimit.allowed) {
+    response.setHeader("Retry-After", String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))));
+    sendJson(response, 429, { error: "Too many Gemini requests. Please try again shortly." });
+    return;
+  }
+
   try {
     if (path === "live-token") {
       await createLiveToken(request, response, settings);
@@ -44,7 +78,8 @@ export default async function handler(request: any, response: any) {
     }
     sendJson(response, 404, { error: "Gemini route not found." });
   } catch (error) {
-    sendJson(response, 500, {
+    const status = error instanceof RequestError ? error.status : 500;
+    sendJson(response, status, {
       error: error instanceof Error ? error.message : "Gemini API route failed.",
     });
   }
@@ -92,6 +127,10 @@ async function createOrderIntent(request: any, response: any, settings: ReturnTy
     sendJson(response, 400, { error: "Missing transcript." });
     return;
   }
+  if (transcript.length > requestLimits.transcriptChars) {
+    sendJson(response, 413, { error: "Transcript is too long." });
+    return;
+  }
 
   const ai = new GoogleGenAI({ apiKey: settings.apiKey });
   const upstream = await ai.models.generateContent({
@@ -109,9 +148,14 @@ async function createOrderIntent(request: any, response: any, settings: ReturnTy
 async function createTts(request: any, response: any, settings: ReturnType<typeof getGeminiSettings>) {
   const body = await readJsonBody(request);
   const text = typeof body.text === "string" ? body.text.trim() : "";
-  const role = typeof body.voiceRole === "string" ? body.voiceRole : "cashier";
+  const requestedRole = typeof body.voiceRole === "string" ? body.voiceRole : "cashier";
+  const role = voiceRoles.has(requestedRole) ? requestedRole : "cashier";
   if (!text) {
     sendJson(response, 400, { error: "Missing text." });
+    return;
+  }
+  if (text.length > requestLimits.ttsChars) {
+    sendJson(response, 413, { error: "Text is too long." });
     return;
   }
 
@@ -201,9 +245,9 @@ function geminiDisabledReason(settings: ReturnType<typeof getGeminiSettings>) {
 function liveConfigForPurpose(purpose: "listen" | "speak", settings: ReturnType<typeof getGeminiSettings>) {
   if (purpose === "speak") {
     return {
-      responseModalities: ["AUDIO"],
+      responseModalities: [Modality.AUDIO],
       outputAudioTranscription: {},
-      thinkingConfig: { thinkingLevel: "MINIMAL" },
+      thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
       speechConfig: {
         voiceConfig: {
           prebuiltVoiceConfig: { voiceName: settings.voices.cashier },
@@ -219,7 +263,7 @@ function liveConfigForPurpose(purpose: "listen" | "speak", settings: ReturnType<
   }
 
   return {
-    responseModalities: ["TEXT"],
+    responseModalities: [Modality.TEXT],
     inputAudioTranscription: {},
     realtimeInputConfig: {
       automaticActivityDetection: {
@@ -272,8 +316,14 @@ function parseJsonObject(text: string) {
 }
 
 async function readJsonBody(request: any) {
-  if (request.body && typeof request.body === "object") return request.body;
-  if (typeof request.body === "string") return JSON.parse(request.body || "{}");
+  if (request.body && typeof request.body === "object") {
+    enforceJsonBodySize(JSON.stringify(request.body));
+    return request.body;
+  }
+  if (typeof request.body === "string") {
+    enforceJsonBodySize(request.body);
+    return JSON.parse(request.body || "{}");
+  }
   return {};
 }
 
@@ -282,6 +332,72 @@ function normalizePath(path: unknown) {
   return typeof path === "string" ? path : "";
 }
 
+function enforceJsonBodySize(body: string) {
+  if (Buffer.byteLength(body, "utf8") > requestLimits.bodyBytes) {
+    throw new RequestError(413, "Request body is too large.");
+  }
+}
+
+function isTrustedOrigin(request: any) {
+  const origin = getHeader(request, "origin");
+  if (!origin) return true;
+
+  const host = getHeader(request, "x-forwarded-host") || getHeader(request, "host");
+  if (!host) return false;
+
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+function consumeRateLimit(request: any, routeName: string) {
+  const now = Date.now();
+  const limit = requestLimits.requestsPerWindow[routeName] ?? 30;
+  const key = `${getClientId(request)}:${routeName}`;
+  const current = rateBuckets.get(key);
+
+  if (!current || current.resetAt <= now) {
+    rateBuckets.set(key, { count: 1, resetAt: now + requestLimits.rateWindowMs });
+    pruneRateBuckets(now);
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  if (current.count >= limit) {
+    return { allowed: false, retryAfterMs: current.resetAt - now };
+  }
+
+  current.count += 1;
+  return { allowed: true, retryAfterMs: 0 };
+}
+
+function getClientId(request: any) {
+  const forwardedFor = getHeader(request, "x-forwarded-for");
+  if (forwardedFor) return forwardedFor.split(",")[0].trim();
+
+  const realIp = getHeader(request, "x-real-ip");
+  if (realIp) return realIp.trim();
+
+  return request.socket?.remoteAddress ?? "unknown";
+}
+
+function getHeader(request: any, name: string) {
+  const raw = request.headers?.[name] ?? request.headers?.[name.toLowerCase()];
+  if (Array.isArray(raw)) return raw[0] ?? "";
+  return typeof raw === "string" ? raw : "";
+}
+
+function pruneRateBuckets(now: number) {
+  if (rateBuckets.size < 1000) return;
+
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+}
+
 function sendJson(response: any, status: number, body: Record<string, unknown>) {
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("X-Content-Type-Options", "nosniff");
   response.status(status).json(body);
 }

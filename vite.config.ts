@@ -4,6 +4,19 @@ import react from "@vitejs/plugin-react";
 
 const geminiTtsCache = new Map();
 const geminiTtsCacheLimit = 80;
+const geminiVoiceRoles = new Set(["cashier", "announcer", "system"]);
+const geminiRateBuckets = new Map();
+const geminiRequestLimits = {
+  bodyBytes: 256 * 1024,
+  transcriptChars: 1200,
+  ttsChars: 600,
+  rateWindowMs: 60_000,
+  requestsPerWindow: {
+    "live-token": 20,
+    "order-intent": 40,
+    tts: 25,
+  },
+};
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
@@ -162,18 +175,10 @@ function installGeminiLiveRoutes(middlewares, settings) {
   });
 
   middlewares.use("/api/gemini/live-token", async (request, response) => {
-    if (request.method !== "POST") {
-      sendJson(response, 405, { error: "Method not allowed." });
-      return;
-    }
-
-    if (!isGeminiEnabled(settings)) {
-      sendJson(response, 403, { error: geminiDisabledReason(settings) });
-      return;
-    }
+    if (!guardGeminiRequest(request, response, settings, "live-token")) return;
 
     try {
-      const body = await readJsonBody(request);
+      const body = await readJsonBody(request, geminiRequestLimits.bodyBytes);
       const purpose = body.purpose === "speak" ? "speak" : "listen";
       const newSessionExpireTime = new Date(Date.now() + 60_000).toISOString();
       const expireTime = new Date(Date.now() + 10 * 60_000).toISOString();
@@ -213,21 +218,17 @@ function installGeminiLiveRoutes(middlewares, settings) {
   });
 
   middlewares.use("/api/gemini/order-intent", async (request, response) => {
-    if (request.method !== "POST") {
-      sendJson(response, 405, { error: "Method not allowed." });
-      return;
-    }
-
-    if (!isGeminiEnabled(settings)) {
-      sendJson(response, 403, { error: geminiDisabledReason(settings) });
-      return;
-    }
+    if (!guardGeminiRequest(request, response, settings, "order-intent")) return;
 
     try {
-      const body = await readJsonBody(request);
+      const body = await readJsonBody(request, geminiRequestLimits.bodyBytes);
       const transcript = typeof body.transcript === "string" ? body.transcript.trim() : "";
       if (!transcript) {
         sendJson(response, 400, { error: "Missing transcript." });
+        return;
+      }
+      if (transcript.length > geminiRequestLimits.transcriptChars) {
+        sendJson(response, 413, { error: "Transcript is too long." });
         return;
       }
 
@@ -263,22 +264,19 @@ function installGeminiLiveRoutes(middlewares, settings) {
   });
 
   middlewares.use("/api/gemini/tts", async (request, response) => {
-    if (request.method !== "POST") {
-      sendJson(response, 405, { error: "Method not allowed." });
-      return;
-    }
-
-    if (!isGeminiEnabled(settings)) {
-      sendJson(response, 403, { error: geminiDisabledReason(settings) });
-      return;
-    }
+    if (!guardGeminiRequest(request, response, settings, "tts")) return;
 
     try {
-      const body = await readJsonBody(request);
+      const body = await readJsonBody(request, geminiRequestLimits.bodyBytes);
       const text = typeof body.text === "string" ? body.text.trim() : "";
-      const role = typeof body.voiceRole === "string" ? body.voiceRole : "cashier";
+      const requestedRole = typeof body.voiceRole === "string" ? body.voiceRole : "cashier";
+      const role = geminiVoiceRoles.has(requestedRole) ? requestedRole : "cashier";
       if (!text) {
         sendJson(response, 400, { error: "Missing text." });
+        return;
+      }
+      if (text.length > geminiRequestLimits.ttsChars) {
+        sendJson(response, 413, { error: "Text is too long." });
         return;
       }
 
@@ -354,6 +352,85 @@ function isGeminiEnabled(settings) {
 function geminiDisabledReason(settings) {
   if (!settings.publicEnabled) return "Gemini is disabled for this deployment. Set GEMINI_PUBLIC_ENABLED=1 to enable cashier voice mode.";
   return "GEMINI_API_KEY or GOOGLE_API_KEY is not set on the server.";
+}
+
+function guardGeminiRequest(request, response, settings, routeName) {
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return false;
+  }
+
+  if (!isGeminiEnabled(settings)) {
+    sendJson(response, 403, { error: geminiDisabledReason(settings) });
+    return false;
+  }
+
+  if (!isTrustedOrigin(request)) {
+    sendJson(response, 403, { error: "Blocked cross-origin Gemini request." });
+    return false;
+  }
+
+  const rateLimit = consumeGeminiRateLimit(request, routeName);
+  if (!rateLimit.allowed) {
+    response.setHeader("Retry-After", String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))));
+    sendJson(response, 429, { error: "Too many Gemini requests. Please try again shortly." });
+    return false;
+  }
+
+  return true;
+}
+
+function isTrustedOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+
+  const host = request.headers.host;
+  if (!host) return false;
+
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+function consumeGeminiRateLimit(request, routeName) {
+  const now = Date.now();
+  const limit = geminiRequestLimits.requestsPerWindow[routeName] ?? 30;
+  const key = `${getGeminiClientId(request)}:${routeName}`;
+  const current = geminiRateBuckets.get(key);
+
+  if (!current || current.resetAt <= now) {
+    geminiRateBuckets.set(key, { count: 1, resetAt: now + geminiRequestLimits.rateWindowMs });
+    pruneGeminiRateBuckets(now);
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  if (current.count >= limit) {
+    return { allowed: false, retryAfterMs: current.resetAt - now };
+  }
+
+  current.count += 1;
+  return { allowed: true, retryAfterMs: 0 };
+}
+
+function getGeminiClientId(request) {
+  const forwardedFor = request.headers["x-forwarded-for"];
+  if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+    return forwardedFor.split(",")[0].trim();
+  }
+
+  const realIp = request.headers["x-real-ip"];
+  if (typeof realIp === "string" && realIp.trim()) return realIp.trim();
+  return request.socket?.remoteAddress ?? "local";
+}
+
+function pruneGeminiRateBuckets(now) {
+  if (geminiRateBuckets.size < 1000) return;
+
+  for (const [key, bucket] of geminiRateBuckets) {
+    if (bucket.resetAt <= now) geminiRateBuckets.delete(key);
+  }
 }
 
 function formatGeminiIntentPrompt(body, transcript) {
@@ -512,13 +589,13 @@ function extractAssistantText(payload) {
   return "";
 }
 
-function readJsonBody(request) {
+function readJsonBody(request, maxBytes = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     request.on("data", (chunk) => {
       size += chunk.length;
-      if (size > 10 * 1024 * 1024) {
+      if (size > maxBytes) {
         reject(new Error("Request body is too large."));
         request.destroy();
         return;
@@ -539,5 +616,7 @@ function readJsonBody(request) {
 function sendJson(response, status, body) {
   response.statusCode = status;
   response.setHeader("Content-Type", "application/json");
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("X-Content-Type-Options", "nosniff");
   response.end(JSON.stringify(body));
 }

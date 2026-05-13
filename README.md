@@ -111,6 +111,8 @@ Local routes installed by `vite.config.ts`:
 
 For Vercel, the same paths are handled by `api/gemini/[...path].ts`. To let people try cashier voice mode for a short window, set `GEMINI_PUBLIC_ENABLED=1` and `GEMINI_API_KEY` in the deployment environment, redeploy, then turn the flag off and redeploy when the demo window is over.
 
+The raw Gemini key stays server-side. Public POST routes reject cross-origin browser requests, enforce small JSON body limits and simple per-IP rate limits, and issue short-lived one-use Live tokens.
+
 Default model and voice overrides:
 
 ```sh

@@ -508,6 +508,7 @@ export default function BobaScene(props: BobaSceneProps) {
     controllers.forEach((controller) => {
       const handler = () => selectFromController(controller);
       controllerSelectHandlers.push({ controller, handler });
+      controller.add(createControllerRay());
       controller.addEventListener("selectend", handler);
       scene.add(controller);
     });
@@ -520,6 +521,7 @@ export default function BobaScene(props: BobaSceneProps) {
       const state = propsRef.current;
       const receiptVisible = state.phase === "receipt" && Boolean(state.receipt);
       const kioskMode = state.experience === "kiosk";
+      const presentingXr = renderer.xr.isPresenting;
       receiptDisplay.hitArea.visible = receiptVisible;
       kiosk.group.visible = kioskMode;
       kiosk.hitArea.visible = kioskMode;
@@ -529,7 +531,10 @@ export default function BobaScene(props: BobaSceneProps) {
         kiosk.update(state.kioskView, state.kioskOpen);
       }
 
-      if (kioskMode && state.kioskOpen) {
+      if (presentingXr) {
+        lookControls.setEnabled(false);
+        wasKioskOpen = false;
+      } else if (kioskMode && state.kioskOpen) {
         lookControls.setEnabled(false);
         camera.position.lerp(kioskCameraPosition, 0.16);
         camera.fov = THREE.MathUtils.lerp(camera.fov, 52, 0.12);
@@ -703,6 +708,13 @@ export default function BobaScene(props: BobaSceneProps) {
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       controllerSelectHandlers.forEach(({ controller, handler }) => {
         controller.removeEventListener("selectend", handler);
+        controller.traverse((object) => {
+          const mesh = object as THREE.Mesh | THREE.Line;
+          mesh.geometry?.dispose();
+          const material = mesh.material;
+          if (Array.isArray(material)) material.forEach((item) => item.dispose());
+          else material?.dispose?.();
+        });
         scene.remove(controller);
       });
       lookControls.dispose();
@@ -856,6 +868,22 @@ function kioskActionFromHit(tablet: KioskTablet, hit: THREE.Intersection): Kiosk
   const x = (localPoint.x / kioskScreenWidth + 0.5) * tablet.canvas.width;
   const y = (0.5 - localPoint.y / kioskScreenHeight) * tablet.canvas.height;
   return tablet.buttons.find((button) => x >= button.x && x <= button.x + button.width && y >= button.y && y <= button.y + button.height)?.action;
+}
+
+function createControllerRay() {
+  const geometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -1.8),
+  ]);
+  const material = new THREE.LineBasicMaterial({
+    color: 0xf1e7c8,
+    transparent: true,
+    opacity: 0.74,
+    depthTest: false,
+  });
+  const ray = new THREE.Line(geometry, material);
+  ray.renderOrder = 120;
+  return ray;
 }
 
 function drawKioskScreen(ctx: CanvasRenderingContext2D, view: KioskViewModel, open: boolean): KioskButton[] {
