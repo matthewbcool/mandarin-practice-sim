@@ -254,6 +254,83 @@ main {
   line-height: 1.55;
 }
 
+.intro-loader {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;
+  z-index: 30;
+  width: min(520px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  padding: 18px;
+  border-radius: 8px;
+  background: rgba(48, 45, 24, 0.88);
+  border: 1px solid rgba(241, 231, 200, 0.18);
+  box-shadow: 0 22px 86px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(22px);
+}
+
+.intro-art {
+  height: 150px;
+  margin-bottom: 14px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(159, 184, 143, 0.34), rgba(189, 118, 89, 0.22)),
+    linear-gradient(180deg, rgba(255, 245, 216, 0.16), rgba(48, 45, 24, 0.1));
+  border: 1px solid rgba(241, 231, 200, 0.16);
+}
+
+.intro-art span {
+  display: grid;
+  place-items: center;
+  width: 70px;
+  height: 70px;
+  border-radius: 50%;
+  color: var(--deep-olive);
+  background: var(--cream);
+  font-size: 34px;
+  font-weight: 950;
+}
+
+.intro-loader h1 {
+  margin: 0 0 8px;
+  font-size: 34px;
+  line-height: 1.08;
+}
+
+.intro-loader p {
+  margin: 0 0 12px;
+  color: rgba(255, 245, 216, 0.82);
+  line-height: 1.48;
+}
+
+.intro-loader small {
+  display: block;
+  margin: 0 0 12px;
+  color: rgba(184, 201, 143, 0.9);
+  line-height: 1.35;
+}
+
+.intro-progress {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.intro-progress i {
+  display: block;
+  width: 36px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 245, 216, 0.18);
+}
+
+.intro-progress--active {
+  background: var(--matcha) !important;
+}
+
 .button-row {
   display: flex;
   flex-wrap: wrap;
@@ -367,7 +444,7 @@ main {
 .speech-feedback {
   left: 50%;
   bottom: 16px;
-  width: min(540px, calc(100vw - 260px));
+  width: min(640px, calc(100vw - 260px));
   min-height: 54px;
   transform: translateX(-50%);
   padding: 9px 14px 10px;
@@ -389,13 +466,11 @@ main {
 
 .speech-feedback p {
   margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   color: rgba(255, 245, 216, 0.94);
   font-size: 18px;
   font-weight: 850;
   line-height: 1.25;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .speech-feedback--listening {

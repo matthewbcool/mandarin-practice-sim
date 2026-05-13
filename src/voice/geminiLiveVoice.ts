@@ -331,6 +331,11 @@ export class GeminiLiveVoiceProvider implements VoiceProvider {
 
       const fail = (error: Error) => {
         if (settled) return;
+        if (audioChunks > 0) {
+          debugGemini("speech stream ended after audio; suppressing fallback", error);
+          void finish();
+          return;
+        }
         settled = true;
         cleanup();
         player.cancel();

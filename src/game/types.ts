@@ -1,4 +1,4 @@
-export type GameMode = "arcade" | "open";
+export type GameMode = "arcade" | "open" | "kiosk";
 
 export type GamePhase =
   | "menu"
@@ -7,6 +7,7 @@ export type GamePhase =
   | "confirming"
   | "paying"
   | "serving"
+  | "kiosk"
   | "receipt"
   | "failed";
 

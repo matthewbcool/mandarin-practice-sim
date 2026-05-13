@@ -6,8 +6,21 @@ import { geminiLivePlan } from "./voice/geminiLivePlan";
 import { ShopRadio } from "./voice/shopRadio";
 import { SuccessCue } from "./voice/successCue";
 import type { DialogueTurn, GameMode, GamePhase, Order, Receipt, RoundObjective, RoundStats } from "./game/types";
-import { compactTicketLines, describeOrder, drinks, iceLevels, missingRequiredFields, orderTotal, ordersMatch, sizes, sweetnessLevels } from "./game/menu";
+import { compactTicketLines, describeOrder, drinks, iceLevels, missingRequiredFields, orderTotal, ordersMatch, sizes, sweetnessLevels, toppings } from "./game/menu";
 import { interpretFreeFlowUtterance } from "./game/geminiIntent";
+import {
+  buildKioskReceipt,
+  cartTotal,
+  kioskLanguageStorageKey,
+  loadKioskReceipts,
+  makeKioskOrder,
+  saveKioskReceipt,
+  type KioskAction,
+  type KioskLanguage,
+  type KioskReceipt,
+  type KioskScreen,
+  type KioskViewModel,
+} from "./game/kiosk";
 import { getObjective } from "./game/rounds";
 import { mergeOrder, parseUtterance, resetOrder } from "./game/parser";
 import { buildReceipt, saveReceipt } from "./game/scoring";
@@ -24,16 +37,182 @@ const freeFlowGazeMissFeedback = "慢慢來，想好了再說，我會等你。"
 const npcSpeechSafetyMs = 5200;
 const postNpcAudioTailMs = 120;
 const postNpcInterruptDelayMs = 80;
+const drinkArrivalReceiptDelayMs = 4600;
+const cashierBreakLine = "我先休息一下，請用旁邊的自助點餐機喔。";
 
 type PendingOrderPrompt = "none" | "drink" | "size" | "sweetness" | "ice" | "confirm";
 type CashierPrompt = {
   text: string;
   suggestion?: Partial<Order>;
 };
+type ExperienceMode = "cashier" | "kiosk";
+type RuntimeStatus = {
+  loaded: boolean;
+  geminiEnabled: boolean;
+  reason?: string;
+};
+type KioskSpeechCue = {
+  title: string;
+  text: string;
+  speakText?: string;
+};
 
 function byId<T extends { id: string }>(items: T[], id: string): T {
   return items.find((item) => item.id === id) ?? items[0];
 }
+
+function readStoredKioskLanguage(): KioskLanguage {
+  if (typeof window === "undefined") return "mix";
+  const stored = window.localStorage.getItem(kioskLanguageStorageKey);
+  return stored === "en" || stored === "zh" || stored === "mix" ? stored : "mix";
+}
+
+function buildIntroPanels() {
+  return [
+    {
+      kicker: "Welcome",
+      title: "Welcome to the boba tea ordering simulator",
+      body: "Practice a real drink-shop conversation: study the menu, place an order, answer follow-up questions, and try again until it clicks.",
+    },
+    {
+      kicker: "Controls",
+      title: "How to move around",
+      body: getPlatformControlInstructions(),
+    },
+    {
+      kicker: "Cashier",
+      title: "Use the kiosk when the cashier is away",
+      body: "The cashier is only available during certain demo windows to save compute. If she is on a break, use the self-ordering kiosk to study the menu and practice the flow.",
+    },
+  ] as const;
+}
+
+function getPlatformControlInstructions() {
+  if (typeof navigator === "undefined" || typeof window === "undefined") {
+    return "Look around the shop, then select the kiosk or cashier when you are ready.";
+  }
+
+  const userAgent = navigator.userAgent.toLowerCase();
+  const headset = /quest|oculus|vive|pico|xr|vr/.test(userAgent);
+  if (headset) {
+    return "In headset: use your controller ray or gaze to aim, then select the cashier or kiosk controls.";
+  }
+
+  const touch = window.matchMedia?.("(pointer: coarse)").matches;
+  if (touch) {
+    return "On mobile or tablet: swipe to look around, then tap the cashier or kiosk controls.";
+  }
+
+  return "On desktop: drag to look around, click controls, and use the talk button when it appears.";
+}
+
+function cloneOrder(order: Order): Order {
+  return {
+    ...order,
+    toppings: [...order.toppings],
+  };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function kioskQuantityLabel(quantity: number) {
+  if (quantity <= 1) return "一杯";
+  if (quantity === 2) return "兩杯";
+  return `${quantity}杯`;
+}
+
+function kioskQuantityPinyin(quantity: number) {
+  if (quantity <= 1) return "yì bēi";
+  if (quantity === 2) return "liǎng bēi";
+  return `${quantity} bēi`;
+}
+
+function kioskSpeechCueForAction(action: KioskAction, currentOrder: Order): KioskSpeechCue | undefined {
+  switch (action.type) {
+    case "selectDrink":
+      return optionKioskCue("Drink", byId(drinks, action.id));
+    case "setSize":
+      return optionKioskCue("Size", byId(sizes, action.id));
+    case "setSweetness":
+      return optionKioskCue("Sweetness", byId(sweetnessLevels, action.id));
+    case "setIce":
+      return optionKioskCue("Ice", byId(iceLevels, action.id));
+    case "toggleTopping": {
+      const topping = byId(toppings, action.id);
+      const removing = currentOrder.toppings.some((item) => item.id === topping.id);
+      return removing
+        ? { title: "Remove topping", text: `不要${topping.label}  bù yào ${pinyinForOption(topping)}`, speakText: `不要${topping.label}` }
+        : optionKioskCue("Topping", topping);
+    }
+    case "setQuantity":
+      return {
+        title: "Quantity",
+        text: `${kioskQuantityLabel(clamp(action.quantity, 1, 9))}  ${kioskQuantityPinyin(clamp(action.quantity, 1, 9))}`,
+        speakText: kioskQuantityLabel(clamp(action.quantity, 1, 9)),
+      };
+    default:
+      return undefined;
+  }
+}
+
+function optionKioskCue(title: string, option: { id: string; label: string }): KioskSpeechCue {
+  return {
+    title,
+    text: `${option.label}  ${pinyinForOption(option)}`,
+    speakText: option.label,
+  };
+}
+
+function pinyinForOption(option: { id: string; label: string }) {
+  return kioskPinyin[option.id] ?? option.label;
+}
+
+const kioskPinyin: Record<string, string> = {
+  aiyu: "ài yù",
+  agar: "hán tiān",
+  "black-tea": "hóng chá",
+  "black-tea-latte": "hóng chá ná tiě",
+  boba: "bō bà",
+  "boba-milk-tea": "bō bà nǎi chá",
+  "brown-sugar-boba-milk": "hēi táng zhēn zhū xiān nǎi",
+  "coconut-jelly": "yē guǒ",
+  "grass-jelly": "xiān cǎo",
+  "grass-jelly-milk-tea": "xiān cǎo nǎi dòng",
+  "green-tea": "lǜ chá",
+  "half-sugar": "bàn táng",
+  hot: "rè",
+  large: "dà bēi",
+  "lemon-black-tea": "níng méng hóng chá",
+  "less-ice": "shǎo bīng",
+  "less-sugar": "shǎo táng",
+  "light-ice": "wēi bīng",
+  "light-sugar": "wēi táng",
+  "matcha-latte": "mǒ chá ná tiě",
+  medium: "zhōng bēi",
+  "milk-foam": "nǎi gài",
+  "milk-tea": "nǎi chá",
+  "mini-pearl": "xiǎo zhēn zhū",
+  "no-ice": "qù bīng",
+  "no-sugar": "wú táng",
+  "oolong-milk-tea": "wū lóng nǎi chá",
+  "oolong-tea": "wū lóng chá",
+  "orange-green-tea": "liǔ chéng lǜ chá",
+  "passion-green-tea": "bǎi xiāng lǜ chá",
+  pearl: "zhēn zhū",
+  "pearl-milk-tea": "zhēn zhū nǎi chá",
+  pudding: "bù dīng",
+  "pudding-milk-tea": "bù dīng nǎi chá",
+  "regular-ice": "zhèng cháng bīng",
+  "regular-sugar": "zhèng cháng táng",
+  sijichun: "sì jì chūn qīng chá",
+  "taro-ball": "yù yuán",
+  "taro-milk": "yù tóu xiān nǎi",
+  "tieguanyin-milk-tea": "tiě guān yīn nǎi chá",
+  "wintermelon-lemon": "dōng guā níng méng",
+  "yakult-green-tea": "duō duō lǜ chá",
+};
 
 function makeStats(): RoundStats {
   return {
@@ -46,7 +225,9 @@ function makeStats(): RoundStats {
 }
 
 export default function App() {
-  const voice = useMemo(() => new GeminiLiveVoiceProvider(new BrowserMandarinVoiceProvider()), []);
+  const browserVoice = useMemo(() => new BrowserMandarinVoiceProvider(), []);
+  const geminiVoice = useMemo(() => new GeminiLiveVoiceProvider(browserVoice), [browserVoice]);
+  const introPanels = useMemo(() => buildIntroPanels(), []);
   const radioRef = useRef<ShopRadio | null>(null);
   const successCueRef = useRef<SuccessCue | null>(null);
   const successCuePlayedRef = useRef(false);
@@ -66,6 +247,9 @@ export default function App() {
   const listenBlockedUntilRef = useRef(0);
   const promptAttemptsRef = useRef<Record<string, number>>({});
   const pendingSuggestionRef = useRef<Partial<Order> | undefined>(undefined);
+  const dialogueRef = useRef<DialogueTurn[]>([]);
+  const completionTokenRef = useRef(0);
+  const lastHandledTranscriptRef = useRef<{ text: string; at: number } | undefined>(undefined);
 
   const [mode, setMode] = useState<GameMode>("arcade");
   const [phase, setPhaseState] = useState<GamePhase>("menu");
@@ -89,6 +273,53 @@ export default function App() {
   const [shareStatus, setShareStatus] = useState("");
   const [pressure, setPressure] = useState(0);
   const [interactionTick, setInteractionTick] = useState(0);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>({ loaded: false, geminiEnabled: false });
+  const [sceneReady, setSceneReady] = useState(false);
+  const [introComplete, setIntroComplete] = useState(false);
+  const [introIndex, setIntroIndex] = useState(0);
+  const [kioskOpen, setKioskOpen] = useState(false);
+  const [kioskScreen, setKioskScreen] = useState<KioskScreen>("drinks");
+  const [kioskLanguage, setKioskLanguage] = useState<KioskLanguage>(readStoredKioskLanguage);
+  const [kioskDrinkPage, setKioskDrinkPage] = useState(0);
+  const [kioskSelected, setKioskSelected] = useState<Order>(() => makeKioskOrder());
+  const [kioskCart, setKioskCart] = useState<Array<{ id: string; order: Order }>>([]);
+  const [kioskReceipt, setKioskReceipt] = useState<KioskReceipt | undefined>();
+  const [, setKioskReceipts] = useState<KioskReceipt[]>(() => loadKioskReceipts());
+
+  const voice = runtimeStatus.geminiEnabled ? geminiVoice : browserVoice;
+  const experience: ExperienceMode = runtimeStatus.loaded && runtimeStatus.geminiEnabled ? "cashier" : "kiosk";
+  const introReady = runtimeStatus.loaded && sceneReady;
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(geminiLivePlan.statusEndpoint);
+        const payload = (await response.json().catch(() => ({}))) as { enabled?: boolean; reason?: string };
+        if (cancelled) return;
+        setRuntimeStatus({
+          loaded: true,
+          geminiEnabled: response.ok && Boolean(payload.enabled),
+          reason: response.ok ? payload.reason : "Gemini status endpoint is unavailable.",
+        });
+      } catch {
+        if (!cancelled) {
+          setRuntimeStatus({
+            loaded: true,
+            geminiEnabled: false,
+            reason: "Gemini status endpoint is unavailable.",
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(kioskLanguageStorageKey, kioskLanguage);
+  }, [kioskLanguage]);
 
   const setPhase = useCallback((next: GamePhase) => {
     phaseRef.current = next;
@@ -116,7 +347,10 @@ export default function App() {
   }, []);
 
   const addTurn = useCallback((speaker: DialogueTurn["speaker"], text: string) => {
-    setDialogue((turns) => [{ speaker, text, at: Date.now() }, ...turns].slice(0, 8));
+    const turn = { speaker, text, at: Date.now() };
+    const next = [turn, ...dialogueRef.current].slice(0, 8);
+    dialogueRef.current = next;
+    setDialogue(next);
   }, []);
 
   const markInteraction = useCallback(() => {
@@ -220,17 +454,26 @@ export default function App() {
       pendingPromptRef.current = "none";
       promptAttemptsRef.current = {};
       pendingSuggestionRef.current = undefined;
+      completionTokenRef.current += 1;
+      lastHandledTranscriptRef.current = undefined;
       npcAudioTokenRef.current += 1;
       setNpcAudioActive(false);
       setNpcSpeakingState(false);
+      if (nextMode !== "kiosk") setKioskOpen(false);
       listenBlockedUntilRef.current = 0;
       setInteractionTick((tick) => tick + 1);
+      dialogueRef.current = [];
       setDialogue([]);
     },
     [setCurrentOrder, setNpcAudioActive, setNpcSpeakingState],
   );
 
   const armMic = useCallback(async () => {
+    if (experience !== "cashier") {
+      setMicReady(false);
+      setAutoListen(false);
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
       setMicReady(voice.isListeningSupported());
       return;
@@ -243,7 +486,18 @@ export default function App() {
       setMicReady(false);
       setAutoListen(false);
     }
-  }, [voice]);
+  }, [experience, voice]);
+
+  useEffect(() => {
+    if (!introComplete || experience !== "kiosk" || phaseRef.current !== "menu") return;
+    resetRoundState("kiosk");
+    setPhase("kiosk");
+    setAutoListen(false);
+    setMicReady(false);
+    setNpcLine("店員先去休息了，請用自助點餐機。");
+    setSpeechFeedbackLabel("自助點餐");
+    setSpeechFeedbackText("點一下櫃台上的螢幕開始。");
+  }, [experience, introComplete, resetRoundState, setPhase]);
 
   const enterOrdering = useCallback(async () => {
     setPhase("ordering");
@@ -251,6 +505,7 @@ export default function App() {
   }, [setPhase, speakNpc]);
 
   const startArcade = useCallback(async (objectiveIndex = roundIndex) => {
+    if (experience !== "cashier") return;
     radioRef.current ??= new ShopRadio();
     radioRef.current.start();
     void armMic();
@@ -263,9 +518,10 @@ export default function App() {
     window.setTimeout(() => {
       if (phaseRef.current === "briefing") void enterOrdering();
     }, orderingEntryDelayMs);
-  }, [armMic, enterOrdering, preloadSuccessCue, resetRoundState, roundIndex, setPhase, voice]);
+  }, [armMic, enterOrdering, experience, preloadSuccessCue, resetRoundState, roundIndex, setPhase, voice]);
 
   const startOpen = useCallback(async () => {
+    if (experience !== "cashier") return;
     radioRef.current ??= new ShopRadio();
     radioRef.current.start();
     void armMic();
@@ -273,12 +529,14 @@ export default function App() {
     preloadSuccessCue();
     setPhase("ordering");
     await speakNpc(openingLine);
-  }, [armMic, preloadSuccessCue, resetRoundState, setPhase, speakNpc]);
+  }, [armMic, experience, preloadSuccessCue, resetRoundState, setPhase, speakNpc]);
 
   const finishSuccess = useCallback(async () => {
     const recognized = orderRef.current;
     const total = orderTotal(recognized);
     statsRef.current.endedAt = Date.now();
+    const completionToken = completionTokenRef.current + 1;
+    completionTokenRef.current = completionToken;
     const nextReceipt = buildReceipt({
       mode,
       objective: objectiveRef.current,
@@ -286,26 +544,17 @@ export default function App() {
       stats: statsRef.current,
       success: true,
     });
-    setReceipt(nextReceipt);
     saveReceipt(nextReceipt);
 
-    if (mode === "open") {
-      pendingPromptRef.current = "none";
-      setPhase("serving");
-      playSuccessCue();
-      void speakNpc(`好，${describeOrder(recognized)}，一共 ${total} 元。你的飲料好了！`);
-      window.setTimeout(() => {
-        if (phaseRef.current === "serving") setPhase("receipt");
-      }, 3600);
-      return;
-    }
-
-    setPhase("paying");
-    await speakNpc(`好，一共 ${total} 元。這邊幫你結帳。`);
+    pendingPromptRef.current = "none";
     setPhase("serving");
     playSuccessCue();
-    await speakNpc("你的飲料好了，謝謝。");
-    setPhase("receipt");
+    void speakNpc(`好，收您 ${total} 元。你的飲料好了！`);
+    window.setTimeout(() => {
+      if (completionTokenRef.current !== completionToken || phaseRef.current !== "serving") return;
+      setReceipt(nextReceipt);
+      setPhase("receipt");
+    }, drinkArrivalReceiptDelayMs);
   }, [mode, playSuccessCue, setPhase, speakNpc]);
 
   const failRound = useCallback(
@@ -362,6 +611,13 @@ export default function App() {
 
   const handleUtterance = useCallback(
     async (text: string) => {
+      const transcriptKey = normalizeTranscriptKey(text);
+      const now = Date.now();
+      const recent = lastHandledTranscriptRef.current;
+      if (recent && recent.text === transcriptKey && now - recent.at < 1800) {
+        return;
+      }
+      lastHandledTranscriptRef.current = { text: transcriptKey, at: now };
       markInteraction();
       setPartial("");
       addTurn("玩家", text);
@@ -373,9 +629,11 @@ export default function App() {
           mode,
           phase: phaseRef.current,
           currentOrder: orderRef.current,
+          targetOrder: mode === "arcade" ? objectiveRef.current?.target : undefined,
           pendingPrompt: pendingPromptRef.current,
           pendingSuggestion: pendingSuggestionRef.current,
           localParsed: parsed,
+          recentTurns: dialogueRef.current,
         });
         parsed = interpreted.parsed;
         modelCashierLine = interpreted.cashierLine;
@@ -385,7 +643,7 @@ export default function App() {
         await speakNpc(radioChangedLine);
         return;
       }
-      if (parsed.sideIntent?.type === "cashier.advice") {
+      if (parsed.sideIntent?.type === "cashier.advice" && Object.keys(parsed.orderPatch).length === 0) {
         await speakNpc(modelCashierLine ?? buildCashierAdvice(parsed.sideIntent.topic, orderRef.current, objectiveRef.current?.target));
         return;
       }
@@ -460,13 +718,19 @@ export default function App() {
         return;
       }
 
-      if (mode === "open" && hasOrderPatch) {
+      const objectiveOrder = mode === "arcade" ? objectiveRef.current?.target : undefined;
+      const missingNext = missingRequiredFields(nextOrder, objectiveOrder);
+      if (modelCashierLine) {
         pendingSuggestionRef.current = undefined;
-        if (modelCashierLine) {
-          pendingPromptRef.current = promptForMissingFields(missingRequiredFields(nextOrder));
-          await speakNpc(modelCashierLine);
-          return;
+        pendingPromptRef.current = promptForMissingFields(missingNext);
+        if (mode === "arcade" && missingNext.length === 0) {
+          pendingPromptRef.current = "confirm";
+          setPhase("confirming");
+        } else if (phaseRef.current === "confirming") {
+          setPhase("ordering");
         }
+        await speakNpc(modelCashierLine);
+        return;
       }
       await askNextQuestion(nextOrder);
     },
@@ -474,6 +738,7 @@ export default function App() {
   );
 
   const startListening = useCallback((source: "manual" | "gaze" = "manual") => {
+    if (experience !== "cashier") return;
     if (listening || !["ordering", "confirming"].includes(phaseRef.current)) return;
     if (source === "gaze" && (npcAudioActiveRef.current || Date.now() < listenBlockedUntilRef.current)) return;
     if (Date.now() - listenCooldownRef.current < listenCooldownMs) return;
@@ -552,9 +817,10 @@ export default function App() {
     } else {
       beginListening();
     }
-  }, [handleUtterance, listening, markInteraction, mode, setListeningState, setNpcAudioActive, setNpcSpeakingState, speakNpc, voice]);
+  }, [experience, handleUtterance, listening, markInteraction, mode, setListeningState, setNpcAudioActive, setNpcSpeakingState, speakNpc, voice]);
 
   useEffect(() => {
+    if (experience !== "cashier") return;
     if (!autoListen || !micReady) return;
     if (focusTarget !== "cashier") return;
     if (!["ordering", "confirming"].includes(phase)) return;
@@ -562,9 +828,10 @@ export default function App() {
     const delay = Math.max(gazeListenDelayMs, listenBlockedUntilRef.current - Date.now());
     const timeout = window.setTimeout(() => startListening("gaze"), delay);
     return () => window.clearTimeout(timeout);
-  }, [autoListen, focusTarget, listening, micReady, npcAudioActive, npcSpeaking, phase, startListening]);
+  }, [autoListen, experience, focusTarget, listening, micReady, npcAudioActive, npcSpeaking, phase, startListening]);
 
   useEffect(() => {
+    if (experience !== "cashier") return undefined;
     if (mode !== "open") return undefined;
     if (!["ordering", "confirming"].includes(phase)) return undefined;
     if (listening || npcSpeaking || npcAudioActive) return undefined;
@@ -578,7 +845,7 @@ export default function App() {
     }, freeFlowIdleHelpMs);
 
     return () => window.clearTimeout(timeout);
-  }, [currentOrder, interactionTick, listening, mode, nextPromptAttempt, npcAudioActive, npcSpeaking, phase, speakCashierPrompt]);
+  }, [currentOrder, experience, interactionTick, listening, mode, nextPromptAttempt, npcAudioActive, npcSpeaking, phase, speakCashierPrompt]);
 
   useEffect(() => {
     if (mode !== "arcade" || !["ordering", "confirming"].includes(phase)) {
@@ -646,6 +913,154 @@ export default function App() {
     }
   }, [receipt]);
 
+  const advanceFromReceipt = useCallback(() => {
+    if (mode === "arcade") {
+      nextRound();
+      return;
+    }
+    void startOpen();
+  }, [mode, nextRound, startOpen]);
+
+  const kioskView = useMemo<KioskViewModel>(
+    () => ({
+      screen: kioskScreen,
+      language: kioskLanguage,
+      drinkPage: kioskDrinkPage,
+      selected: kioskSelected,
+      cart: kioskCart,
+      receipt: kioskReceipt,
+    }),
+    [kioskCart, kioskDrinkPage, kioskLanguage, kioskReceipt, kioskScreen, kioskSelected],
+  );
+
+  const handleCashierBreak = useCallback(() => {
+    markInteraction();
+    setNpcLine(cashierBreakLine);
+    setSpeechFeedbackLabel("店員");
+    setSpeechFeedbackText(cashierBreakLine);
+    addTurn("店員", cashierBreakLine);
+    browserVoice.cancelSpeech();
+    void browserVoice.speak(cashierBreakLine, { voiceRole: "cashier" });
+  }, [addTurn, browserVoice, markInteraction]);
+
+  const speakKioskCue = useCallback(
+    (cue: KioskSpeechCue) => {
+      setSpeechFeedbackLabel(cue.title);
+      setSpeechFeedbackText(cue.text);
+      void browserVoice.speak(cue.speakText ?? cue.text, { voiceRole: "system", rate: 0.9 });
+    },
+    [browserVoice],
+  );
+
+  const handleKioskAction = useCallback(
+    (action: KioskAction) => {
+      markInteraction();
+      const speechCue = kioskSpeechCueForAction(action, kioskSelected);
+      if (speechCue) speakKioskCue(speechCue);
+      switch (action.type) {
+        case "open":
+          setKioskOpen(true);
+          setKioskScreen(kioskReceipt ? "receipt" : kioskCart.length ? "cart" : "drinks");
+          return;
+        case "close":
+          setKioskOpen(false);
+          return;
+        case "back":
+          if (kioskScreen === "customize") setKioskScreen("drinks");
+          else if (kioskScreen === "cart") setKioskScreen("drinks");
+          else if (kioskScreen === "receipt") {
+            setKioskReceipt(undefined);
+            setKioskCart([]);
+            setKioskScreen("drinks");
+          } else setKioskOpen(false);
+          return;
+        case "nextDrinkPage":
+          setKioskDrinkPage((page) => Math.min(page + 1, Math.ceil(drinks.length / 8) - 1));
+          return;
+        case "previousDrinkPage":
+          setKioskDrinkPage((page) => Math.max(0, page - 1));
+          return;
+        case "selectDrink":
+          setKioskSelected(makeKioskOrder(byId(drinks, action.id)));
+          setKioskReceipt(undefined);
+          setKioskScreen("customize");
+          return;
+        case "setSize":
+          setKioskSelected((order) => ({ ...order, size: byId(sizes, action.id) }));
+          return;
+        case "setSweetness":
+          setKioskSelected((order) => ({ ...order, sweetness: byId(sweetnessLevels, action.id) }));
+          return;
+        case "setIce":
+          setKioskSelected((order) => ({ ...order, ice: byId(iceLevels, action.id) }));
+          return;
+        case "toggleTopping": {
+          const topping = byId(toppings, action.id);
+          setKioskSelected((order) => {
+            const exists = order.toppings.some((item) => item.id === topping.id);
+            return {
+              ...order,
+              toppings: exists ? order.toppings.filter((item) => item.id !== topping.id) : [...order.toppings, topping],
+            };
+          });
+          return;
+        }
+        case "setQuantity":
+          setKioskSelected((order) => ({ ...order, quantity: clamp(action.quantity, 1, 9) }));
+          return;
+        case "addToCart":
+          if (!kioskSelected.drink) return;
+          setKioskCart((cart) => [...cart, { id: `item-${Date.now().toString(36)}-${cart.length}`, order: cloneOrder(kioskSelected) }]);
+          setKioskReceipt(undefined);
+          setKioskSelected(makeKioskOrder());
+          setKioskScreen("cart");
+          return;
+        case "showCart":
+          setKioskScreen("cart");
+          return;
+        case "removeItem":
+          setKioskCart((cart) => cart.filter((item) => item.id !== action.id));
+          return;
+        case "clearCart":
+          setKioskCart([]);
+          setKioskReceipt(undefined);
+          setKioskScreen("drinks");
+          return;
+        case "checkout": {
+          if (!kioskCart.length) return;
+          const nextReceipt = buildKioskReceipt(kioskCart);
+          setKioskReceipt(nextReceipt);
+          setKioskReceipts(saveKioskReceipt(nextReceipt));
+          setKioskScreen("receipt");
+          return;
+        }
+        case "newOrder":
+          setKioskReceipt(undefined);
+          setKioskCart([]);
+          setKioskSelected(makeKioskOrder());
+          setKioskScreen("drinks");
+          return;
+        case "setLanguage":
+          setKioskLanguage(action.language);
+          return;
+      }
+    },
+    [kioskCart, kioskReceipt, kioskScreen, kioskSelected, markInteraction, speakKioskCue],
+  );
+
+  const completeIntro = useCallback(() => {
+    if (!introReady) return;
+    setIntroComplete(true);
+  }, [introReady]);
+
+  const nextIntroPanel = useCallback(() => {
+    if (introIndex < introPanels.length - 1) {
+      setIntroIndex((index) => index + 1);
+      return;
+    }
+    completeIntro();
+  }, [completeIntro, introIndex, introPanels.length]);
+
   const typedSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!typedInput.trim()) return;
@@ -656,13 +1071,15 @@ export default function App() {
     setTypedInput("");
   };
 
-  const liveRound = ["ordering", "confirming", "paying", "serving"].includes(phase);
-  const playerTurn = ["ordering", "confirming"].includes(phase) && !npcSpeaking && !npcAudioActive;
+  const liveRound = experience === "cashier" && ["ordering", "confirming", "paying", "serving"].includes(phase);
+  const playerTurn = experience === "cashier" && ["ordering", "confirming"].includes(phase) && !npcSpeaking && !npcAudioActive;
+  const showSpeechFeedback = liveRound || (experience === "kiosk" && phase === "kiosk");
 
   return (
     <main>
       <BobaScene
         phase={phase}
+        experience={experience}
         listening={listening}
         npcSpeaking={npcSpeaking}
         npcLine={npcLine}
@@ -672,20 +1089,32 @@ export default function App() {
         currentOrder={currentOrder}
         receipt={receipt}
         cashierPose={COUNTER_CASHIER_POSE}
+        kioskOpen={kioskOpen}
+        kioskView={kioskView}
         onFocusTargetChange={setFocusTarget}
+        onReceiptAdvance={advanceFromReceipt}
+        onKioskAction={handleKioskAction}
+        onCashierBreak={handleCashierBreak}
+        onSceneReady={() => setSceneReady(true)}
       />
 
-      <div
-        className={`reticle ${focusTarget !== "none" ? "reticle--active" : ""} ${playerTurn ? "reticle--ready" : ""} ${listening ? "reticle--listening" : ""}`}
-      />
+      {introComplete && (
+        <div
+          className={`reticle ${focusTarget !== "none" ? "reticle--active" : ""} ${playerTurn ? "reticle--ready" : ""} ${listening ? "reticle--listening" : ""}`}
+        />
+      )}
 
       <section className={`hud hud--top ${liveRound ? "hud--quiet" : ""}`}>
         <div className="brand">
           <span>珍奶快打</span>
-          <small>{mode === "arcade" ? `第 ${roundIndex + 1} 關` : "自由模式"}</small>
+          <small>{experience === "kiosk" ? "自助點餐" : mode === "arcade" ? `第 ${roundIndex + 1} 關` : "自由模式"}</small>
         </div>
         {!liveRound && <div className="status-pill" title={geminiLivePlan.model}>
-          語音：Gemini Live
+          {runtimeStatus.loaded
+            ? experience === "cashier"
+              ? "Cashier voice"
+              : "Public Mode"
+            : "Loading"}
         </div>}
         {mode === "arcade" && liveRound && pressure > 0 && (
           <div className="pressure-meter">
@@ -695,21 +1124,47 @@ export default function App() {
             </div>
           </div>
         )}
-        <label className="toggle">
-          <input type="checkbox" checked={autoListen} onChange={(event) => setAutoListen(event.target.checked)} />
-          <span>凝視聆聽</span>
-        </label>
+        {experience === "cashier" && (
+          <label className="toggle">
+            <input type="checkbox" checked={autoListen} onChange={(event) => setAutoListen(event.target.checked)} />
+            <span>Gaze listen</span>
+          </label>
+        )}
       </section>
 
-      {phase === "menu" && (
-        <section className="panel start-panel">
-          <span className="mode-kicker">台灣飲料店實戰</span>
-          <h1>珍奶快打</h1>
-          <p>聽目標，站上櫃台，用中文把飲料點對。越順，分數越高；越卡，後面越急。</p>
+      {!introComplete && (
+        <section className="intro-loader" aria-live="polite">
+          <div className="intro-art" aria-hidden="true">
+            <span>{introIndex + 1}</span>
+          </div>
+          <span className="mode-kicker">{introPanels[introIndex].kicker}</span>
+          <h1>{introPanels[introIndex].title}</h1>
+          <p>{introPanels[introIndex].body}</p>
+          <div className="intro-progress" aria-label="Intro progress">
+            {introPanels.map((panel, index) => (
+              <i key={panel.title} className={index <= introIndex ? "intro-progress--active" : ""} />
+            ))}
+          </div>
           <div className="button-row">
-            <button onClick={() => void startArcade()}>開始挑戰</button>
+            <button onClick={nextIntroPanel} disabled={introIndex === introPanels.length - 1 && !introReady}>
+              {introIndex === introPanels.length - 1 ? (introReady ? "Enter" : "Loading") : "Next"}
+            </button>
+            <button className="secondary" onClick={completeIntro} disabled={!introReady}>
+              Skip
+            </button>
+          </div>
+        </section>
+      )}
+
+      {introComplete && experience === "cashier" && phase === "menu" && (
+        <section className="panel start-panel">
+          <span className="mode-kicker">Taiwan drink shop practice</span>
+          <h1>珍奶快打</h1>
+          <p>Listen to the target order, step up to the counter, and order the drink in Mandarin. The smoother you are, the higher your score.</p>
+          <div className="button-row">
+            <button onClick={() => void startArcade()}>Start Challenge</button>
             <button className="secondary" onClick={() => void startOpen()}>
-              自由練習
+              Free Practice
             </button>
           </div>
         </section>
@@ -734,7 +1189,7 @@ export default function App() {
 
       {partial && <section className="partial">「{partial}」</section>}
 
-      {["ordering", "confirming", "paying", "serving"].includes(phase) && speechFeedbackText && (
+      {showSpeechFeedback && speechFeedbackText && (
         <section className={`speech-feedback ${listening ? "speech-feedback--listening" : ""}`} aria-live="polite">
           <span>{speechFeedbackLabel}</span>
           <p>{speechFeedbackText}</p>
@@ -744,13 +1199,13 @@ export default function App() {
       {["ordering", "confirming"].includes(phase) && (
         <section className={`controls ${playerTurn ? "controls--ready" : ""}`}>
           <button className={listening ? "danger" : ""} onClick={() => startListening("manual")} disabled={!voice.isListeningSupported()}>
-            {listening ? "正在聽..." : npcSpeaking || npcAudioActive ? "打斷說話" : "輪到你說"}
+            {listening ? "Listening..." : npcSpeaking || npcAudioActive ? "Interrupt" : "Speak"}
           </button>
           <details>
-            <summary>文字測試</summary>
+            <summary>Text test</summary>
             <form onSubmit={typedSubmit}>
               <input value={typedInput} onChange={(event) => setTypedInput(event.target.value)} placeholder="我要一杯珍珠奶茶半糖少冰" />
-              <button type="submit">送出</button>
+              <button type="submit">Submit</button>
             </form>
           </details>
         </section>
@@ -760,7 +1215,7 @@ export default function App() {
         <section className="technical">
           <h2>收音異常</h2>
           <p>系統連續兩次沒有聽清楚。請檢查麥克風，或改用按一下說話。</p>
-          <button onClick={() => setTechnicalOverlay(false)}>繼續</button>
+          <button onClick={() => setTechnicalOverlay(false)}>Continue</button>
         </section>
       )}
 
@@ -768,17 +1223,17 @@ export default function App() {
         <section className="fail-screen">
           <h2>點單失敗</h2>
           <p>{npcLine}</p>
-          <button onClick={() => void startArcade()}>重新挑戰</button>
+          <button onClick={() => void startArcade()}>Try Again</button>
         </section>
       )}
 
       {phase === "receipt" && receipt && (
         <section className={`end-actions ${focusTarget === "receipt" ? "end-actions--quiet" : ""}`} aria-label="回合完成操作">
           <div className="button-row">
-            <button onClick={() => void shareReceipt()}>分享成績</button>
-            <button onClick={nextRound}>下一張點單</button>
+            <button onClick={() => void shareReceipt()}>Share Score</button>
+            <button onClick={nextRound}>Next Order</button>
             <button className="secondary" onClick={() => void startOpen()}>
-              自由練習
+              Free Practice
             </button>
           </div>
           {shareStatus && <small className="share-status">{shareStatus}</small>}
@@ -930,9 +1385,10 @@ async function writeClipboardText(text: string) {
 }
 
 function shouldAskGeminiIntent(mode: GameMode, parsed: ReturnType<typeof parseUtterance>) {
-  if (mode !== "open") return false;
   if (parsed.sideIntent?.type === "radio.nextTrack") return false;
-  if (parsed.confirms || parsed.denies) return false;
+  const hasOrderPatch = Object.keys(parsed.orderPatch).length > 0;
+  if (parsed.confirms && !hasOrderPatch) return false;
+  if (parsed.denies && !hasOrderPatch) return false;
   return true;
 }
 
@@ -1135,6 +1591,10 @@ function normalizePromptAnswer(text: string) {
 
 function normalizeLooseAnswer(text: string) {
   return normalizePromptAnswer(text).replace(/['"]/g, "");
+}
+
+function normalizeTranscriptKey(text: string) {
+  return normalizePromptAnswer(text).replace(/[「」『』"'“”‘’]/g, "");
 }
 
 function buildFreeFlowIdleHelp(order: Order, phase: GamePhase, attempt: number): CashierPrompt {

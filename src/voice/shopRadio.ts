@@ -16,8 +16,8 @@ const RADIO_TRACKS = [
   },
 ] as const;
 
-const RADIO_VOLUME = 0.09;
-const DUCKED_VOLUME = 0.026;
+const RADIO_VOLUME = 0.12;
+const DUCKED_VOLUME = 0.034;
 const DUCK_FADE_MS = 180;
 const TRACK_CROSSFADE_MS = 1200;
 

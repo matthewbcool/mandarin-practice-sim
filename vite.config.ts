@@ -17,6 +17,7 @@ export default defineConfig(({ mode }) => {
     intentModel: env.GEMINI_INTENT_MODEL ?? "gemini-3.1-flash-lite",
     ttsModel: env.GEMINI_TTS_MODEL ?? "gemini-2.5-flash-preview-tts",
     apiKey: env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY ?? "",
+    publicEnabled: env.GEMINI_PUBLIC_ENABLED === "1",
     voices: {
       cashier: env.VITE_GEMINI_CASHIER_VOICE ?? "Aoede",
       announcer: env.VITE_GEMINI_ANNOUNCER_VOICE ?? "Zephyr",
@@ -145,12 +146,18 @@ function installNvidiaOmniRoutes(middlewares, settings) {
 
 function installGeminiLiveRoutes(middlewares, settings) {
   middlewares.use("/api/gemini/live/status", (_request, response) => {
+    const enabled = isGeminiEnabled(settings);
     sendJson(response, 200, {
-      enabled: Boolean(settings.apiKey),
+      enabled,
+      publicEnabled: settings.publicEnabled,
       model: settings.model,
       intentModel: settings.intentModel,
       ttsModel: settings.ttsModel,
-      reason: settings.apiKey ? undefined : "Set GEMINI_API_KEY or GOOGLE_API_KEY before starting Vite.",
+      reason: enabled
+        ? undefined
+        : settings.publicEnabled
+          ? "Set GEMINI_API_KEY or GOOGLE_API_KEY before starting Vite."
+          : "Set GEMINI_PUBLIC_ENABLED=1 to enable Gemini-backed cashier mode.",
     });
   });
 
@@ -160,8 +167,8 @@ function installGeminiLiveRoutes(middlewares, settings) {
       return;
     }
 
-    if (!settings.apiKey) {
-      sendJson(response, 501, { error: "GEMINI_API_KEY or GOOGLE_API_KEY is not set on the local dev server." });
+    if (!isGeminiEnabled(settings)) {
+      sendJson(response, 403, { error: geminiDisabledReason(settings) });
       return;
     }
 
@@ -211,8 +218,8 @@ function installGeminiLiveRoutes(middlewares, settings) {
       return;
     }
 
-    if (!settings.apiKey) {
-      sendJson(response, 501, { error: "GEMINI_API_KEY or GOOGLE_API_KEY is not set on the local dev server." });
+    if (!isGeminiEnabled(settings)) {
+      sendJson(response, 403, { error: geminiDisabledReason(settings) });
       return;
     }
 
@@ -238,7 +245,7 @@ function installGeminiLiveRoutes(middlewares, settings) {
         ],
         config: {
           responseMimeType: "application/json",
-          temperature: 0.45,
+          temperature: 0.7,
         },
       });
 
@@ -261,8 +268,8 @@ function installGeminiLiveRoutes(middlewares, settings) {
       return;
     }
 
-    if (!settings.apiKey) {
-      sendJson(response, 501, { error: "GEMINI_API_KEY or GOOGLE_API_KEY is not set on the local dev server." });
+    if (!isGeminiEnabled(settings)) {
+      sendJson(response, 403, { error: geminiDisabledReason(settings) });
       return;
     }
 
@@ -340,6 +347,15 @@ function installGeminiLiveRoutes(middlewares, settings) {
   });
 }
 
+function isGeminiEnabled(settings) {
+  return Boolean(settings.publicEnabled && settings.apiKey);
+}
+
+function geminiDisabledReason(settings) {
+  if (!settings.publicEnabled) return "Gemini is disabled for this deployment. Set GEMINI_PUBLIC_ENABLED=1 to enable cashier voice mode.";
+  return "GEMINI_API_KEY or GOOGLE_API_KEY is not set on the server.";
+}
+
 function formatGeminiIntentPrompt(body, transcript) {
   const payload = {
     transcript,
@@ -347,30 +363,48 @@ function formatGeminiIntentPrompt(body, transcript) {
     phase: body.phase ?? "ordering",
     pendingPrompt: body.pendingPrompt ?? "none",
     currentOrder: body.currentOrder ?? {},
+    targetOrder: body.targetOrder ?? null,
     pendingSuggestion: body.pendingSuggestion ?? {},
     localParsed: body.localParsed ?? {},
+    orderAfterLocalParse: body.orderAfterLocalParse ?? {},
+    missingFieldsBefore: body.missingFieldsBefore ?? [],
+    missingFieldsAfterLocalParse: body.missingFieldsAfterLocalParse ?? [],
+    totalAfterLocalParse: body.totalAfterLocalParse ?? 0,
+    recentTurns: body.recentTurns ?? [],
     menu: body.menu ?? {},
   };
 
   return [
-    "你是台灣手搖飲點餐遊戲的店員大腦：同時解析玩家意圖，並替店員寫下一句自然回覆。",
-    "情境：玩家正在用繁體中文和台灣飲料店店員點餐。自由模式要像真人點餐，不要像教學流程或表單。",
-    "請根據 transcript、目前訂單、店員剛問的欄位、以及可用菜單，推斷玩家這一句話的意思，並產生 cashierLine。",
+    "Persona:",
+    "你是台灣手搖飲店的真人店員，不是老師、表單、客服機器人或教學旁白。",
+    "你親切、有效率、台灣口語自然。你只使用繁體中文與台灣華語。",
+    "",
+    "Goal:",
+    "根據玩家剛說的話解析訂單，並替店員產生下一句自然回覆。店員的目標是把訂單補齊：飲料、杯型、甜度、冰塊、可選加料，最後告知金額並送單。",
+    "自由模式不是固定流程。玩家可以一次講很多項、改單、問推薦、跳順序、只回答一個詞。你要自然接住，不要硬照同一套問題重複問。",
+    "挑戰模式可以自然問問題，但不要透露 targetOrder；遊戲會另外判定玩家有沒有點對。",
+    "",
+    "Conversation rules:",
+    "- cashierLine 必須依照「玩家這句話 + 目前訂單 + recentTurns」推進對話，而不是重複上一句。",
+    "- 先更新 orderPatch，再決定還缺什麼；如果某欄位已經被 currentOrder、localParsed 或你的 orderPatch 捕捉到，絕對不要再問同一欄位。",
+    "- 如果還缺多個欄位，可以像真人一樣合併問，例如「中杯大杯？甜度冰塊怎麼做？」但不要每次都同一句。",
+    "- 如果玩家問推薦，直接以店員口吻給一個短建議，然後問玩家要不要照做。",
+    "- 如果玩家確認建議或訂單，例如「好」「可以」「對」「是的」「OK」，設定 confirms: true。不要因此猜沒有根據的品項。",
+    "- 如果玩家否認、改單或打斷，例如「不是」「改成」「等一下」，設定 denies: true，並解析他要改的欄位。",
+    "- 如果訂單資料已足夠，cashierLine 要很短，可以確認或結帳，不要長篇複誦整張單。",
+    "- 如果聽不懂，就用真人店員的方式換一種問法，不要一直重複同一句。",
+    "- 不要預設教學；只有玩家問建議、看起來卡住、或 recentTurns 顯示沉默/不懂時才給提示。",
+    "- cashierLine 最多一句，20 到 45 個中文字左右。不要英文、拼音、Markdown 或解釋。",
+    "",
+    "Parsing rules:",
+    "- 使用 menu 裡的 id。玩家說法不完全相同時，選最接近的台灣手搖飲品項。",
+    "- 常見口語：無甜/wu tian/wu tien 等於無糖；少甜約等於少糖；不加冰/不要冰等於去冰。",
+    "- 珍珠奶茶、波霸奶茶、布丁奶茶等飲料名稱裡的內容不算額外加料；只有玩家明確說「加、加料、多加、配、放」時才填 toppingIds。",
+    "- 不確定就留空，不要亂猜飲料或配料。",
+    "",
+    "Output:",
     "只輸出 JSON，不要 Markdown，不要額外文字。",
-    "規則：",
-    "- 使用繁體中文與台灣用語理解玩家。",
-    "- 如果玩家自然說出飲料、杯型、甜度、冰塊、加料，請填入 orderPatch 的 id。",
-    "- 如果玩家用不同說法表達同一件事，可以對應到最接近的菜單 id。",
-    "- 幾乎每次都要給 cashierLine：像真人店員一樣接話、確認你聽到的內容，然後問下一個必要問題。",
-    "- cashierLine 可以有一點個性、口語停頓或輕鬆語氣，但要像台灣服務業店員，不要像老師。",
-    "- 如果玩家只是在問建議，設定 sideIntent，cashierLine 要直接自然地給建議。",
-    "- 如果玩家確認店員剛剛的建議，例如「好」「可以」「對」，設定 confirms: true。不要硬塞沒有依據的品項。",
-    "- 如果玩家否認或想修改，例如「不是」「等一下」「改成」，設定 denies: true。",
-    "- 不要重複完整訂單很多次；資料夠了時，確認要簡短，例如「好，這樣可以嗎？」",
-    "- 不要每句都教學。只有玩家問、卡住、或沉默很久才提示怎麼說。",
-    "- cashierLine 最多兩短句，全部繁體中文，不要英文或拼音。",
-    "- 不確定就留空欄位，不要猜飲料或配料。",
-    "JSON 格式：",
+    "JSON schema example:",
     JSON.stringify({
       orderPatch: {
         quantity: 1,
@@ -386,7 +420,8 @@ function formatGeminiIntentPrompt(body, transcript) {
       cashierLine: "",
       confidence: 0.8,
     }),
-    "輸入：",
+    "",
+    "Input payload:",
     JSON.stringify(payload),
   ].join("\n");
 }

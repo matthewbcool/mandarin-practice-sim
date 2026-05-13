@@ -3,10 +3,12 @@ import * as THREE from "three";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
-import { describeOrder } from "../game/menu";
-import type { GamePhase, Order, Receipt } from "../game/types";
+import { describeOrder, drinks, iceLevels, orderTotal, sizes, sweetnessLevels, toppings } from "../game/menu";
+import { cartTotal, type KioskAction, type KioskLanguage, type KioskViewModel } from "../game/kiosk";
+import type { GamePhase, MenuOption, Order, Receipt } from "../game/types";
 
-export type FocusTarget = "cashier" | "line" | "receipt" | "none";
+export type FocusTarget = "cashier" | "line" | "kiosk" | "receipt" | "none";
+export type SceneExperience = "cashier" | "kiosk";
 export interface CashierPoseTuning {
   rootY: number;
   rootZ: number;
@@ -41,6 +43,7 @@ export interface CashierPoseTuning {
 
 interface BobaSceneProps {
   phase: GamePhase;
+  experience: SceneExperience;
   listening: boolean;
   npcSpeaking: boolean;
   npcLine: string;
@@ -50,7 +53,13 @@ interface BobaSceneProps {
   currentOrder: Order;
   receipt?: Receipt;
   cashierPose: CashierPoseTuning;
+  kioskOpen: boolean;
+  kioskView: KioskViewModel;
   onFocusTargetChange: (target: FocusTarget) => void;
+  onReceiptAdvance?: () => void;
+  onKioskAction?: (action: KioskAction) => void;
+  onCashierBreak?: () => void;
+  onSceneReady?: () => void;
 }
 
 const WORLD_URL = "/assets/world/cozy-boba-shop.spz";
@@ -171,6 +180,7 @@ export default function BobaScene(props: BobaSceneProps) {
     const focusObjects: THREE.Object3D[] = [];
     const animatedCharacters: THREE.Object3D[] = [];
     let cashierRoot: THREE.Object3D | undefined;
+    let cashierDefaultRotationY = 0;
     let cashierBlink: CashierBlinkController | undefined;
     let lastFocusTarget: FocusTarget = "none";
 
@@ -186,6 +196,10 @@ export default function BobaScene(props: BobaSceneProps) {
     const receiptDisplay = createReceiptDisplay();
     scene.add(receiptDisplay.group);
     focusObjects.push(receiptDisplay.hitArea);
+
+    const kiosk = createKioskTablet();
+    scene.add(kiosk.group);
+    focusObjects.push(kiosk.screenMesh, kiosk.hitArea);
 
     const confetti = createConfettiBurst();
     scene.add(confetti.group);
@@ -275,6 +289,7 @@ export default function BobaScene(props: BobaSceneProps) {
         cashierRoot.name = "cashier";
         applyCashierRootPose(cashierRoot, propsRef.current.cashierPose);
         cashierRoot.rotation.y = 0;
+        cashierDefaultRotationY = cashierRoot.rotation.y;
         cashierRoot.traverse((child) => {
           child.userData.focusTarget = "cashier";
           if ((child as THREE.Mesh).isMesh) {
@@ -294,6 +309,7 @@ export default function BobaScene(props: BobaSceneProps) {
         cashierRoot = createFallbackCharacter(0xffc3a5);
         applyCashierRootPose(cashierRoot, propsRef.current.cashierPose);
         cashierRoot.rotation.y = Math.PI;
+        cashierDefaultRotationY = cashierRoot.rotation.y;
         cashierRoot.userData.focusTarget = "cashier";
         focusObjects.push(cashierRoot);
         scene.add(cashierRoot);
@@ -384,17 +400,27 @@ export default function BobaScene(props: BobaSceneProps) {
     let lastSpeechText = "";
     let lastSpeechTitle = "";
     let lastReceiptId = "";
+    let lastDrinkVisualKey = "";
     let wasCelebrating = false;
     let receiptFocused = false;
     let receiptGazeStartedAt = -1;
     let receiptFocusAmount = 0;
     const counterDrinkPosition = new THREE.Vector3(0.58, 0.86, -0.88);
-    const celebrationDrinkPosition = new THREE.Vector3(0, 1.08, -0.72);
-    const receiptDrinkPosition = new THREE.Vector3(0, 1.08, -0.72);
+    const celebrationDrinkPosition = new THREE.Vector3(0, 1.05, -0.8);
+    const receiptDrinkPosition = new THREE.Vector3(0.05, 1.04, -0.9);
     const receiptSidePosition = new THREE.Vector3(0.46, 1.18, -0.78);
     const receiptFocusedPosition = new THREE.Vector3();
     const receiptForward = new THREE.Vector3();
     const receiptSideQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -0.16, 0.018));
+    const homeCameraPosition = new THREE.Vector3(debug.camera[0], debug.camera[1], debug.camera[2]);
+    const homeTarget = new THREE.Vector3(...debug.target);
+    const kioskCameraPosition = new THREE.Vector3(0.08, 1.4, -0.42);
+    const kioskCameraTarget = new THREE.Vector3(0.12, 1.42, -1.22);
+    const xrControllerRayOrigin = new THREE.Vector3();
+    const xrControllerRayDirection = new THREE.Vector3();
+    const xrControllerMatrix = new THREE.Matrix4();
+    let wasKioskOpen = false;
+    let lastKioskRenderKey = "";
 
     const onResize = () => {
       const width = mount.clientWidth;
@@ -406,6 +432,11 @@ export default function BobaScene(props: BobaSceneProps) {
     window.addEventListener("resize", onResize);
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && propsRef.current.experience === "kiosk" && propsRef.current.kioskOpen) {
+        event.preventDefault();
+        propsRef.current.onKioskAction?.({ type: "close" });
+        return;
+      }
       if (event.key.toLowerCase() === "r") {
         camera.position.set(debug.camera[0], debug.camera[1], debug.camera[2]);
         lookControls.reset(new THREE.Vector3(...debug.target));
@@ -413,24 +444,115 @@ export default function BobaScene(props: BobaSceneProps) {
     };
     window.addEventListener("keydown", onKeyDown);
 
-    const onPointerUp = () => {
-      if (propsRef.current.phase === "receipt" && lastFocusTarget === "receipt") {
-        receiptFocused = true;
+    const pointer = new THREE.Vector2();
+    let pointerDownX = 0;
+    let pointerDownY = 0;
+    const handleSelectionFromRaycaster = () => {
+      const state = propsRef.current;
+      const receiptVisible = state.phase === "receipt" && Boolean(state.receipt);
+      const hits = raycaster.intersectObjects(focusObjects, true);
+      const hit = hits.find((item) => {
+        const focus = item.object.userData.focusTarget as FocusTarget | undefined;
+        return focus !== "receipt" || receiptVisible;
+      });
+      const focus = (hit?.object.userData.focusTarget as FocusTarget | undefined) ?? "none";
+
+      if (state.experience === "kiosk") {
+        if (focus === "kiosk" && hit) {
+          if (!state.kioskOpen) {
+            state.onKioskAction?.({ type: "open" });
+            return;
+          }
+          if (hit.object.userData.kioskScreen) {
+            const action = kioskActionFromHit(kiosk, hit);
+            if (action) state.onKioskAction?.(action);
+          }
+          return;
+        }
+        if (focus === "cashier") {
+          state.onCashierBreak?.();
+          return;
+        }
+      }
+
+      if (receiptVisible && (focus === "receipt" || lastFocusTarget === "receipt")) {
+        if (!receiptFocused) {
+          receiptFocused = true;
+          return;
+        }
+        state.onReceiptAdvance?.();
       }
     };
+
+    const onPointerDown = (event: PointerEvent) => {
+      pointerDownX = event.clientX;
+      pointerDownY = event.clientY;
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const distance = Math.hypot(event.clientX - pointerDownX, event.clientY - pointerDownY);
+      if (distance > 10) return;
+      const bounds = renderer.domElement.getBoundingClientRect();
+      pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -(((event.clientY - bounds.top) / bounds.height) * 2 - 1));
+      raycaster.setFromCamera(pointer, camera);
+      handleSelectionFromRaycaster();
+    };
+    const selectFromController = (controller: THREE.Object3D) => {
+      xrControllerMatrix.identity().extractRotation(controller.matrixWorld);
+      xrControllerRayOrigin.setFromMatrixPosition(controller.matrixWorld);
+      xrControllerRayDirection.set(0, 0, -1).applyMatrix4(xrControllerMatrix);
+      raycaster.set(xrControllerRayOrigin, xrControllerRayDirection);
+      handleSelectionFromRaycaster();
+    };
+    const controllers = debug.noXr ? [] : [renderer.xr.getController(0), renderer.xr.getController(1)];
+    const controllerSelectHandlers: Array<{ controller: ReturnType<typeof renderer.xr.getController>; handler: () => void }> = [];
+    controllers.forEach((controller) => {
+      const handler = () => selectFromController(controller);
+      controllerSelectHandlers.push({ controller, handler });
+      controller.addEventListener("selectend", handler);
+      scene.add(controller);
+    });
+    renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
+    window.setTimeout(() => propsRef.current.onSceneReady?.(), 0);
 
     renderer.setAnimationLoop(() => {
       const elapsed = clock.getElapsedTime();
       const state = propsRef.current;
       const receiptVisible = state.phase === "receipt" && Boolean(state.receipt);
+      const kioskMode = state.experience === "kiosk";
       receiptDisplay.hitArea.visible = receiptVisible;
-      lookControls.update();
+      kiosk.group.visible = kioskMode;
+      kiosk.hitArea.visible = kioskMode;
+      const kioskRenderKey = buildKioskRenderKey(state.kioskOpen, state.kioskView);
+      if (kioskMode && kioskRenderKey !== lastKioskRenderKey) {
+        lastKioskRenderKey = kioskRenderKey;
+        kiosk.update(state.kioskView, state.kioskOpen);
+      }
+
+      if (kioskMode && state.kioskOpen) {
+        lookControls.setEnabled(false);
+        camera.position.lerp(kioskCameraPosition, 0.16);
+        camera.fov = THREE.MathUtils.lerp(camera.fov, 52, 0.12);
+        camera.updateProjectionMatrix();
+        camera.lookAt(kioskCameraTarget);
+        wasKioskOpen = true;
+      } else {
+        if (wasKioskOpen) {
+          lookControls.reset(homeTarget);
+          wasKioskOpen = false;
+        }
+        lookControls.setEnabled(true);
+        if (kioskMode) camera.position.lerp(homeCameraPosition, 0.08);
+        camera.fov = THREE.MathUtils.lerp(camera.fov, debug.fov, 0.12);
+        camera.updateProjectionMatrix();
+        lookControls.update();
+      }
 
       raycaster.setFromCamera(center, camera);
       const intersects = raycaster.intersectObjects(focusObjects, true);
       const focusHit = intersects.find((hit) => {
         const focus = hit.object.userData.focusTarget as FocusTarget | undefined;
+        if (focus === "kiosk" && !kioskMode) return false;
         return focus !== "receipt" || receiptVisible;
       });
       const target = (focusHit?.object.userData.focusTarget as FocusTarget | undefined) ?? "none";
@@ -463,7 +585,15 @@ export default function BobaScene(props: BobaSceneProps) {
       if (cashierRoot) {
         const speakingBob = state.npcSpeaking ? Math.sin(elapsed * 18) * 0.012 : Math.sin(elapsed * 2.3) * 0.006;
         applyCashierRootPose(cashierRoot, state.cashierPose, speakingBob);
-        cashierRoot.rotation.z = Math.sin(elapsed * 1.4) * 0.012;
+        if (state.experience === "kiosk") {
+          cashierRoot.position.x -= 0.68;
+          cashierRoot.position.z += 0.24;
+          cashierRoot.rotation.y = -0.28;
+          cashierRoot.rotation.z = Math.sin(elapsed * 1.1) * 0.007;
+        } else {
+          cashierRoot.rotation.y = cashierDefaultRotationY;
+          cashierRoot.rotation.z = Math.sin(elapsed * 1.4) * 0.012;
+        }
         poseCashierAvatar(cashierRoot, state.cashierPose);
         cashierBlink?.update(elapsed);
       }
@@ -474,7 +604,7 @@ export default function BobaScene(props: BobaSceneProps) {
         character.rotation.z = Math.sin(elapsed * 1.2 + index) * 0.01;
       });
 
-      exclamation.visible = target === "cashier" && state.listening;
+      exclamation.visible = state.experience === "cashier" && target === "cashier" && state.listening;
       exclamation.scale.setScalar(0.34 + Math.sin(elapsed * 7) * 0.03);
       const celebrating = state.phase === "serving";
       if (celebrating && !wasCelebrating) confetti.start(elapsed);
@@ -482,12 +612,18 @@ export default function BobaScene(props: BobaSceneProps) {
       confetti.update(elapsed);
 
       const drinkVisible = celebrating || receiptVisible;
+      const drinkOrder = state.receipt?.recognized ?? state.currentOrder;
+      const drinkVisualKey = buildDrinkVisualKey(drinkOrder);
+      if (drinkVisualKey !== lastDrinkVisualKey) {
+        lastDrinkVisualKey = drinkVisualKey;
+        updateDrinkPreview(drink, drinkOrder);
+      }
       const drinkOpacity = receiptVisible ? 1 - receiptFocusAmount : 1;
       drink.visible = drinkVisible && drinkOpacity > 0.03;
       const targetDrinkPosition = celebrating ? celebrationDrinkPosition : receiptVisible ? receiptDrinkPosition : counterDrinkPosition;
       drink.position.lerp(targetDrinkPosition, 0.22);
-      const receiptDrinkScale = THREE.MathUtils.lerp(1.42, 0.92, receiptFocusAmount);
-      drink.scale.setScalar(celebrating ? 1.72 + Math.sin(elapsed * 5.5) * 0.035 : receiptVisible ? receiptDrinkScale : 1.1);
+      const receiptDrinkScale = THREE.MathUtils.lerp(1.08, 0.72, receiptFocusAmount);
+      drink.scale.setScalar(celebrating ? 1.38 + Math.sin(elapsed * 5.5) * 0.026 : receiptVisible ? receiptDrinkScale : 1);
       drink.rotation.y = celebrating ? elapsed * 1.6 : receiptVisible ? Math.sin(elapsed * 1.2) * 0.08 : Math.sin(elapsed * 1.2) * 0.16;
       drink.rotation.z = celebrating ? Math.sin(elapsed * 4.2) * 0.035 : 0;
       setObjectOpacity(drink, drinkOpacity);
@@ -507,8 +643,9 @@ export default function BobaScene(props: BobaSceneProps) {
         receiptDisplay.setOpacity(THREE.MathUtils.lerp(0.92, 1, Math.max(receiptFocusAmount, gazeProgress)));
       }
 
-      const showGameplayPanels = ["ordering", "confirming", "paying", "serving"].includes(state.phase);
-      npcBubble.sprite.visible = showGameplayPanels && Boolean(state.npcLine);
+      const showCashierPanels = state.experience === "cashier" && ["ordering", "confirming", "paying", "serving"].includes(state.phase);
+      const showKioskSubtitle = state.experience === "kiosk" && state.phase === "kiosk";
+      npcBubble.sprite.visible = showCashierPanels && Boolean(state.npcLine);
       if (npcBubble.sprite.visible && state.npcLine !== lastNpcText) {
         lastNpcText = state.npcLine;
         npcBubble.update(state.npcLine);
@@ -516,7 +653,7 @@ export default function BobaScene(props: BobaSceneProps) {
 
       const orderText = describeOrder(state.currentOrder);
       const orderTitle = state.phase === "confirming" ? "確認中" : "目前聽到";
-      orderPanel.sprite.visible = showGameplayPanels && state.phase !== "serving" && hasOrderContent(state.currentOrder);
+      orderPanel.sprite.visible = showCashierPanels && state.phase !== "serving" && hasOrderContent(state.currentOrder);
       if (orderPanel.sprite.visible && (orderText !== lastOrderText || orderTitle !== lastOrderTitle)) {
         lastOrderText = orderText;
         lastOrderTitle = orderTitle;
@@ -524,7 +661,7 @@ export default function BobaScene(props: BobaSceneProps) {
       }
 
       const pressureText = `耐心 ${Math.max(0, 100 - state.pressure)}%`;
-      pressurePanel.sprite.visible = showGameplayPanels && state.pressure > 14;
+      pressurePanel.sprite.visible = showCashierPanels && state.pressure > 14;
       if (pressurePanel.sprite.visible && pressureText !== lastPressureText) {
         lastPressureText = pressureText;
         pressurePanel.update(pressureText);
@@ -532,7 +669,7 @@ export default function BobaScene(props: BobaSceneProps) {
 
       const speechText = state.playerSpeechText || (state.listening ? "請說話，我正在聽。" : "");
       const speechTitle = state.listening ? "正在聽" : state.playerSpeechLabel || "聽到";
-      speechPanel.sprite.visible = showGameplayPanels && state.phase !== "serving" && Boolean(speechText);
+      speechPanel.sprite.visible = ((showCashierPanels && state.phase !== "serving") || showKioskSubtitle) && Boolean(speechText);
       if (speechPanel.sprite.visible && (speechText !== lastSpeechText || speechTitle !== lastSpeechTitle)) {
         lastSpeechText = speechText;
         lastSpeechTitle = speechTitle;
@@ -562,10 +699,16 @@ export default function BobaScene(props: BobaSceneProps) {
       renderer.setAnimationLoop(null);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKeyDown);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      controllerSelectHandlers.forEach(({ controller, handler }) => {
+        controller.removeEventListener("selectend", handler);
+        scene.remove(controller);
+      });
       lookControls.dispose();
       confetti.dispose();
       receiptDisplay.dispose();
+      kiosk.dispose();
       renderer.dispose();
       vrButton?.remove();
       mount.removeChild(renderer.domElement);
@@ -575,6 +718,528 @@ export default function BobaScene(props: BobaSceneProps) {
 
   return <div ref={mountRef} className="scene-canvas" />;
 }
+
+interface KioskButton {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  action: KioskAction;
+}
+
+interface KioskTablet {
+  group: THREE.Group;
+  screenMesh: THREE.Mesh;
+  hitArea: THREE.Mesh;
+  canvas: HTMLCanvasElement;
+  texture: THREE.CanvasTexture;
+  buttons: KioskButton[];
+  update: (view: KioskViewModel, open: boolean) => void;
+  dispose: () => void;
+}
+
+const kioskScreenWidth = 0.98;
+const kioskScreenHeight = 0.62;
+
+function createKioskTablet(): KioskTablet {
+  const group = new THREE.Group();
+  group.position.set(0.12, 1.42, -1.22);
+  group.rotation.x = -0.08;
+  group.scale.setScalar(0.72);
+  group.userData.focusTarget = "kiosk";
+
+  const frameMaterial = new THREE.MeshStandardMaterial({
+    color: 0x262119,
+    roughness: 0.72,
+    metalness: 0.18,
+  });
+  const trimMaterial = new THREE.MeshStandardMaterial({
+    color: 0x9fb88f,
+    roughness: 0.66,
+    metalness: 0.06,
+  });
+  const standMaterial = new THREE.MeshStandardMaterial({
+    color: 0x574331,
+    roughness: 0.76,
+    metalness: 0.08,
+  });
+
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.08, 0.72, 0.05), frameMaterial);
+  frame.userData.focusTarget = "kiosk";
+  group.add(frame);
+
+  const trim = new THREE.Mesh(new THREE.BoxGeometry(1.14, 0.78, 0.018), trimMaterial);
+  trim.position.z = -0.018;
+  trim.userData.focusTarget = "kiosk";
+  group.add(trim);
+
+  const stand = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.17, 0.08), standMaterial);
+  stand.position.set(0, -0.44, -0.02);
+  stand.rotation.x = 0.16;
+  stand.userData.focusTarget = "kiosk";
+  group.add(stand);
+
+  const base = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.04, 0.24), standMaterial);
+  base.position.set(0, -0.56, 0.02);
+  base.userData.focusTarget = "kiosk";
+  group.add(base);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 1024;
+  canvas.height = 720;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+
+  const screenMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(kioskScreenWidth, kioskScreenHeight),
+    new THREE.MeshBasicMaterial({ map: texture, toneMapped: false }),
+  );
+  screenMesh.position.z = 0.033;
+  screenMesh.userData.focusTarget = "kiosk";
+  screenMesh.userData.kioskScreen = true;
+  group.add(screenMesh);
+
+  const hitArea = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.02, 0.66),
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.001,
+      depthWrite: false,
+    }),
+  );
+  hitArea.position.z = 0.041;
+  hitArea.userData.focusTarget = "kiosk";
+  hitArea.userData.kioskScreen = true;
+  group.add(hitArea);
+
+  const tablet: KioskTablet = {
+    group,
+    screenMesh,
+    hitArea,
+    canvas,
+    texture,
+    buttons: [],
+    update(view, open) {
+      this.buttons = drawKioskScreen(canvas.getContext("2d")!, view, open);
+      texture.needsUpdate = true;
+    },
+    dispose() {
+      texture.dispose();
+      [frameMaterial, trimMaterial, standMaterial].forEach((material) => material.dispose());
+      group.traverse((object) => {
+        if ((object as THREE.Mesh).geometry) (object as THREE.Mesh).geometry.dispose();
+        const material = (object as THREE.Mesh).material;
+        if (Array.isArray(material)) material.forEach((item) => item.dispose());
+        else material?.dispose?.();
+      });
+    },
+  };
+
+  tablet.update(
+    {
+      screen: "drinks",
+      language: "mix",
+      drinkPage: 0,
+      selected: { quantity: 1, toppings: [] },
+      cart: [],
+    },
+    false,
+  );
+
+  return tablet;
+}
+
+function kioskActionFromHit(tablet: KioskTablet, hit: THREE.Intersection): KioskAction | undefined {
+  const localPoint = tablet.screenMesh.worldToLocal(hit.point.clone());
+  const x = (localPoint.x / kioskScreenWidth + 0.5) * tablet.canvas.width;
+  const y = (0.5 - localPoint.y / kioskScreenHeight) * tablet.canvas.height;
+  return tablet.buttons.find((button) => x >= button.x && x <= button.x + button.width && y >= button.y && y <= button.y + button.height)?.action;
+}
+
+function drawKioskScreen(ctx: CanvasRenderingContext2D, view: KioskViewModel, open: boolean): KioskButton[] {
+  const { width, height } = ctx.canvas;
+  const buttons: KioskButton[] = [];
+  ctx.clearRect(0, 0, width, height);
+  drawKioskBackground(ctx);
+
+  if (!open) {
+    drawClosedKiosk(ctx, view, buttons);
+    return buttons;
+  }
+
+  drawKioskHeader(ctx, view, buttons);
+  if (view.screen === "customize") drawCustomizeScreen(ctx, view, buttons);
+  else if (view.screen === "cart") drawCartScreen(ctx, view, buttons);
+  else if (view.screen === "receipt") drawReceiptScreen(ctx, view, buttons);
+  else drawDrinkScreen(ctx, view, buttons);
+  return buttons;
+}
+
+function drawKioskBackground(ctx: CanvasRenderingContext2D) {
+  const { width, height } = ctx.canvas;
+  const bg = ctx.createLinearGradient(0, 0, width, height);
+  bg.addColorStop(0, "#fff5d8");
+  bg.addColorStop(0.58, "#f1e7c8");
+  bg.addColorStop(1, "#d9caa1");
+  ctx.fillStyle = bg;
+  roundRect(ctx, 0, 0, width, height, 18);
+  ctx.fill();
+  ctx.fillStyle = "rgba(48, 45, 24, 0.05)";
+  for (let y = 42; y < height; y += 54) ctx.fillRect(0, y, width, 1);
+}
+
+function drawClosedKiosk(ctx: CanvasRenderingContext2D, view: KioskViewModel, buttons: KioskButton[]) {
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#302d18";
+  ctx.font = "900 72px system-ui, sans-serif";
+  ctx.fillText(copy("tapToOrder", view.language), 512, 300);
+  ctx.fillStyle = "rgba(48, 45, 24, 0.64)";
+  ctx.font = "800 34px system-ui, sans-serif";
+  ctx.fillText(copy("publicMode", view.language), 512, 368);
+  addKioskButton(ctx, buttons, 342, 464, 340, 96, copy("start", view.language), { type: "open" }, { tone: "primary" });
+}
+
+function drawKioskHeader(ctx: CanvasRenderingContext2D, view: KioskViewModel, buttons: KioskButton[]) {
+  ctx.fillStyle = "rgba(48, 45, 24, 0.88)";
+  roundRect(ctx, 22, 20, 980, 86, 18);
+  ctx.fill();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#fff5d8";
+  ctx.font = "900 32px system-ui, sans-serif";
+  ctx.fillText(copy("title", view.language), 46, 64);
+
+  const total = cartTotal(view.cart);
+  ctx.fillStyle = "#b8c98f";
+  ctx.font = "850 23px system-ui, sans-serif";
+  ctx.fillText(`${copy("cart", view.language)} ${view.cart.length} / ${total} 元`, 276, 64);
+
+  const languages: KioskLanguage[] = ["mix", "en", "zh"];
+  languages.forEach((language, index) => {
+    addKioskButton(ctx, buttons, 610 + index * 90, 34, 76, 46, languageLabel(language), { type: "setLanguage", language }, {
+      tone: language === view.language ? "primary" : undefined,
+      small: true,
+    });
+  });
+  addKioskButton(ctx, buttons, 884, 28, 94, 58, "X", { type: "close" }, { small: true });
+}
+
+function drawDrinkScreen(ctx: CanvasRenderingContext2D, view: KioskViewModel, buttons: KioskButton[]) {
+  drawSectionTitle(ctx, copy("chooseDrink", view.language), 52, 144);
+  const pageSize = 8;
+  const pageCount = Math.ceil(drinks.length / pageSize);
+  const page = Math.min(view.drinkPage, pageCount - 1);
+  drinks.slice(page * pageSize, page * pageSize + pageSize).forEach((drink, index) => {
+    const col = index % 2;
+    const row = Math.floor(index / 2);
+    const x = 52 + col * 462;
+    const y = 184 + row * 86;
+    addKioskButton(ctx, buttons, x, y, 420, 68, `${optionLabel(drink, view.language)}  ${drink.price ?? 0}元`, { type: "selectDrink", id: drink.id }, { align: "left" });
+  });
+
+  addKioskButton(ctx, buttons, 52, 582, 150, 64, copy("previous", view.language), { type: "previousDrinkPage" }, { disabled: page <= 0, tone: "ghost" });
+  addKioskButton(ctx, buttons, 224, 582, 170, 64, `${page + 1}/${pageCount}`, { type: "previousDrinkPage" }, { disabled: true, tone: "ghost" });
+  addKioskButton(ctx, buttons, 416, 582, 150, 64, copy("next", view.language), { type: "nextDrinkPage" }, { disabled: page >= pageCount - 1, tone: "ghost" });
+  addKioskButton(ctx, buttons, 712, 582, 238, 64, copy("viewCart", view.language), { type: "showCart" }, { tone: view.cart.length ? "primary" : "ghost" });
+}
+
+function drawCustomizeScreen(ctx: CanvasRenderingContext2D, view: KioskViewModel, buttons: KioskButton[]) {
+  const order = view.selected;
+  drawSectionTitle(ctx, optionLabel(order.drink ?? drinks[0], view.language), 52, 138);
+  ctx.fillStyle = "rgba(48, 45, 24, 0.68)";
+  ctx.font = "800 24px system-ui, sans-serif";
+  ctx.fillText(`${copy("lineTotal", view.language)} ${orderTotal(order)} 元`, 52, 174);
+
+  drawOptionRow(ctx, buttons, copy("size", view.language), sizes, order.size?.id, view.language, "setSize", 52, 214);
+  drawOptionRow(ctx, buttons, copy("sweetness", view.language), sweetnessLevels, order.sweetness?.id, view.language, "setSweetness", 52, 308);
+  drawOptionRow(ctx, buttons, copy("ice", view.language), iceLevels, order.ice?.id, view.language, "setIce", 52, 402);
+
+  drawSectionTitle(ctx, copy("toppings", view.language), 52, 514, 24);
+  toppings.forEach((topping, index) => {
+    const selected = order.toppings.some((item) => item.id === topping.id);
+    const col = index % 5;
+    const row = Math.floor(index / 5);
+    addKioskButton(ctx, buttons, 52 + col * 182, 538 + row * 54, 160, 42, optionLabel(topping, view.language), { type: "toggleTopping", id: topping.id }, {
+      tone: selected ? "primary" : "ghost",
+      small: true,
+    });
+  });
+
+  addKioskButton(ctx, buttons, 606, 132, 64, 52, "-", { type: "setQuantity", quantity: Math.max(1, order.quantity - 1) }, { tone: "ghost" });
+  ctx.fillStyle = "#302d18";
+  ctx.font = "900 30px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(String(order.quantity), 714, 158);
+  addKioskButton(ctx, buttons, 758, 132, 64, 52, "+", { type: "setQuantity", quantity: Math.min(9, order.quantity + 1) }, { tone: "ghost" });
+  addKioskButton(ctx, buttons, 52, 648, 170, 52, copy("back", view.language), { type: "back" }, { tone: "ghost" });
+  addKioskButton(ctx, buttons, 708, 642, 242, 58, copy("add", view.language), { type: "addToCart" }, { tone: "primary" });
+}
+
+function drawOptionRow(
+  ctx: CanvasRenderingContext2D,
+  buttons: KioskButton[],
+  title: string,
+  options: MenuOption[],
+  selectedId: string | undefined,
+  language: KioskLanguage,
+  actionType: "setSize" | "setSweetness" | "setIce",
+  x: number,
+  y: number,
+) {
+  ctx.fillStyle = "rgba(48, 45, 24, 0.72)";
+  ctx.font = "900 24px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(title, x, y);
+  options.forEach((option, index) => {
+    const buttonWidth = actionType === "setSize" ? 150 : 158;
+    addKioskButton(ctx, buttons, x + index * (buttonWidth + 12), y + 18, buttonWidth, 46, optionLabel(option, language), { type: actionType, id: option.id }, {
+      tone: option.id === selectedId ? "primary" : "ghost",
+      small: true,
+    });
+  });
+}
+
+function drawCartScreen(ctx: CanvasRenderingContext2D, view: KioskViewModel, buttons: KioskButton[]) {
+  drawSectionTitle(ctx, copy("cart", view.language), 52, 144);
+  if (!view.cart.length) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(48, 45, 24, 0.62)";
+    ctx.font = "850 34px system-ui, sans-serif";
+    ctx.fillText(copy("emptyCart", view.language), 512, 330);
+  }
+  view.cart.slice(0, 5).forEach((item, index) => {
+    const y = 190 + index * 72;
+    ctx.fillStyle = index % 2 ? "rgba(255, 255, 255, 0.28)" : "rgba(159, 184, 143, 0.2)";
+    roundRect(ctx, 52, y, 708, 54, 14);
+    ctx.fill();
+    ctx.fillStyle = "#302d18";
+    ctx.font = "850 24px system-ui, sans-serif";
+    ctx.textAlign = "left";
+    wrapCanvasText(ctx, describeOrder(item.order), 560, 1).forEach((line) => ctx.fillText(line, 74, y + 34));
+    ctx.textAlign = "right";
+    ctx.fillText(`${orderTotal(item.order)} 元`, 742, y + 34);
+    addKioskButton(ctx, buttons, 786, y + 6, 128, 42, copy("remove", view.language), { type: "removeItem", id: item.id }, { tone: "ghost", small: true });
+  });
+
+  if (view.cart.length > 5) {
+    ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(48, 45, 24, 0.62)";
+    ctx.font = "800 22px system-ui, sans-serif";
+    ctx.fillText(`+${view.cart.length - 5}`, 74, 562);
+  }
+
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#302d18";
+  ctx.font = "900 40px system-ui, sans-serif";
+  ctx.fillText(`${copy("total", view.language)} ${cartTotal(view.cart)} 元`, 950, 582);
+  addKioskButton(ctx, buttons, 52, 642, 170, 58, copy("addMore", view.language), { type: "back" }, { tone: "ghost" });
+  addKioskButton(ctx, buttons, 244, 642, 170, 58, copy("clear", view.language), { type: "clearCart" }, { tone: "ghost", disabled: !view.cart.length });
+  addKioskButton(ctx, buttons, 708, 642, 242, 58, copy("checkout", view.language), { type: "checkout" }, { tone: "primary", disabled: !view.cart.length });
+}
+
+function drawReceiptScreen(ctx: CanvasRenderingContext2D, view: KioskViewModel, buttons: KioskButton[]) {
+  drawSectionTitle(ctx, copy("receipt", view.language), 52, 144);
+  const receipt = view.receipt;
+  const lines = receipt?.lines ?? [];
+  lines.slice(0, 6).forEach((line, index) => {
+    ctx.fillStyle = index % 2 ? "rgba(255, 255, 255, 0.22)" : "rgba(159, 184, 143, 0.16)";
+    roundRect(ctx, 70, 190 + index * 58, 884, 44, 12);
+    ctx.fill();
+    ctx.fillStyle = "#302d18";
+    ctx.font = "820 22px system-ui, sans-serif";
+    ctx.textAlign = "left";
+    wrapCanvasText(ctx, line, 810, 1).forEach((text) => ctx.fillText(text, 94, 218 + index * 58));
+  });
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#302d18";
+  ctx.font = "900 48px system-ui, sans-serif";
+  ctx.fillText(`${copy("total", view.language)} ${receipt?.total ?? 0} 元`, 950, 582);
+  addKioskButton(ctx, buttons, 52, 642, 170, 58, copy("newOrder", view.language), { type: "newOrder" }, { tone: "ghost" });
+  addKioskButton(ctx, buttons, 708, 642, 242, 58, copy("done", view.language), { type: "close" }, { tone: "primary" });
+}
+
+function addKioskButton(
+  ctx: CanvasRenderingContext2D,
+  buttons: KioskButton[],
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  label: string,
+  action: KioskAction,
+  options: { tone?: "primary" | "ghost"; disabled?: boolean; small?: boolean; align?: "left" | "center" } = {},
+) {
+  const disabled = Boolean(options.disabled);
+  const tone = options.tone ?? "default";
+  const fill = disabled
+    ? "rgba(48, 45, 24, 0.14)"
+    : tone === "primary"
+      ? "#9fb88f"
+      : tone === "ghost"
+        ? "rgba(48, 45, 24, 0.08)"
+        : "#fffaf0";
+  ctx.fillStyle = fill;
+  roundRect(ctx, x, y, width, height, 12);
+  ctx.fill();
+  ctx.strokeStyle = tone === "primary" ? "rgba(48, 45, 24, 0.22)" : "rgba(48, 45, 24, 0.16)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = disabled ? "rgba(48, 45, 24, 0.36)" : "#302d18";
+  ctx.font = `${options.small ? 760 : 850} ${options.small ? 21 : 25}px system-ui, sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = options.align === "left" ? "left" : "center";
+  const lines = wrapCanvasText(ctx, label, width - 28, options.small ? 1 : 2);
+  lines.forEach((line, index) => {
+    const textY = y + height / 2 + (index - (lines.length - 1) / 2) * (options.small ? 22 : 26);
+    ctx.fillText(line, options.align === "left" ? x + 20 : x + width / 2, textY);
+  });
+  if (!disabled) buttons.push({ x, y, width, height, action });
+}
+
+function drawSectionTitle(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, size = 34) {
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#302d18";
+  ctx.font = `900 ${size}px system-ui, sans-serif`;
+  ctx.fillText(text, x, y);
+}
+
+function buildKioskRenderKey(open: boolean, view: KioskViewModel) {
+  const selected = view.selected;
+  return JSON.stringify({
+    open,
+    screen: view.screen,
+    language: view.language,
+    drinkPage: view.drinkPage,
+    selected: [
+      selected.quantity,
+      selected.drink?.id,
+      selected.size?.id,
+      selected.sweetness?.id,
+      selected.ice?.id,
+      selected.toppings.map((item) => item.id).join(","),
+    ],
+    cart: view.cart.map((item) => `${item.id}:${orderTotal(item.order)}`).join("|"),
+    receipt: view.receipt?.id,
+  });
+}
+
+function copy(key: string, language: KioskLanguage) {
+  const dictionary: Record<string, { en: string; zh: string; mix: string }> = {
+    add: { en: "Add to cart", zh: "加入購物車", mix: "加入 Add" },
+    addMore: { en: "Add more", zh: "繼續加點", mix: "加點 More" },
+    back: { en: "Back", zh: "返回", mix: "Back 返回" },
+    cart: { en: "Cart", zh: "購物車", mix: "Cart 購物車" },
+    checkout: { en: "Checkout", zh: "結帳", mix: "Checkout 結帳" },
+    chooseDrink: { en: "Choose a drink", zh: "選擇飲料", mix: "Choose 飲料" },
+    clear: { en: "Clear", zh: "清空", mix: "Clear 清空" },
+    done: { en: "Done", zh: "完成", mix: "Done 完成" },
+    emptyCart: { en: "Your cart is empty", zh: "購物車是空的", mix: "Cart is empty" },
+    ice: { en: "Ice", zh: "冰塊", mix: "Ice 冰塊" },
+    lineTotal: { en: "Item total", zh: "小計", mix: "Item 小計" },
+    newOrder: { en: "New order", zh: "新訂單", mix: "New 新訂單" },
+    next: { en: "Next", zh: "下一頁", mix: "Next 下一頁" },
+    previous: { en: "Previous", zh: "上一頁", mix: "Prev 上一頁" },
+    publicMode: { en: "Public Mode", zh: "公開模式", mix: "Public Mode" },
+    receipt: { en: "Receipt", zh: "收據", mix: "Receipt 收據" },
+    remove: { en: "Remove", zh: "移除", mix: "Remove" },
+    size: { en: "Size", zh: "杯型", mix: "Size 杯型" },
+    start: { en: "Start order", zh: "開始點餐", mix: "Start 點餐" },
+    sweetness: { en: "Sweetness", zh: "甜度", mix: "Sweet 甜度" },
+    tapToOrder: { en: "Tap to order", zh: "點一下開始點餐", mix: "Tap to order" },
+    title: { en: "Boba Kiosk", zh: "珍奶自助點餐", mix: "Boba 自助點餐" },
+    toppings: { en: "Toppings", zh: "加料", mix: "Toppings 加料" },
+    total: { en: "Total", zh: "總計", mix: "Total 總計" },
+    viewCart: { en: "View cart", zh: "查看購物車", mix: "View Cart" },
+  };
+  return dictionary[key]?.[language] ?? key;
+}
+
+function optionLabel(option: MenuOption, language: KioskLanguage) {
+  const english = englishOptionLabels[option.id] ?? option.label;
+  if (language === "en") return english;
+  if (language === "zh") return option.label;
+  return `${option.label} ${shortEnglishOptionLabels[option.id] ?? english}`;
+}
+
+function languageLabel(language: KioskLanguage) {
+  if (language === "en") return "EN";
+  if (language === "zh") return "中文";
+  return "Mix";
+}
+
+const englishOptionLabels: Record<string, string> = {
+  "aiyu": "Aiyu Jelly",
+  "agar": "Agar",
+  "black-tea": "Black Tea",
+  "black-tea-latte": "Black Tea Latte",
+  "boba": "Boba",
+  "boba-milk-tea": "Boba Milk Tea",
+  "brown-sugar-boba-milk": "Brown Sugar Boba Milk",
+  "coconut-jelly": "Coconut Jelly",
+  "grass-jelly": "Grass Jelly",
+  "grass-jelly-milk-tea": "Grass Jelly Milk Tea",
+  "green-tea": "Green Tea",
+  "half-sugar": "Half Sugar",
+  "hot": "Hot",
+  "large": "Large",
+  "lemon-black-tea": "Lemon Black Tea",
+  "less-ice": "Less Ice",
+  "less-sugar": "Less Sugar",
+  "light-ice": "Light Ice",
+  "light-sugar": "Light Sugar",
+  "matcha-latte": "Matcha Latte",
+  "medium": "Medium",
+  "milk-foam": "Milk Foam",
+  "milk-tea": "Milk Tea",
+  "mini-pearl": "Mini Pearls",
+  "no-ice": "No Ice",
+  "no-sugar": "No Sugar",
+  "oolong-milk-tea": "Oolong Milk Tea",
+  "oolong-tea": "Oolong Tea",
+  "orange-green-tea": "Orange Green Tea",
+  "passion-green-tea": "Passion Green Tea",
+  "pearl": "Pearls",
+  "pearl-milk-tea": "Pearl Milk Tea",
+  "pudding": "Pudding",
+  "pudding-milk-tea": "Pudding Milk Tea",
+  "regular-ice": "Regular Ice",
+  "regular-sugar": "Regular Sugar",
+  "sijichun": "Sijichun Tea",
+  "taro-ball": "Taro Balls",
+  "taro-milk": "Taro Milk",
+  "tieguanyin-milk-tea": "Tieguanyin Milk Tea",
+  "wintermelon-lemon": "Wintermelon Lemon",
+  "yakult-green-tea": "Yakult Green Tea",
+};
+
+const shortEnglishOptionLabels: Record<string, string> = {
+  "agar": "Agar",
+  "aiyu": "Aiyu",
+  "boba": "Boba",
+  "coconut-jelly": "Coconut",
+  "grass-jelly": "Grass",
+  "half-sugar": "Half",
+  "hot": "Hot",
+  "large": "Large",
+  "less-ice": "Less Ice",
+  "less-sugar": "Less",
+  "light-ice": "Light Ice",
+  "light-sugar": "Light",
+  "medium": "Med",
+  "milk-foam": "Foam",
+  "mini-pearl": "Mini",
+  "no-ice": "No Ice",
+  "no-sugar": "No Sugar",
+  "pearl": "Pearls",
+  "pudding": "Pudding",
+  "regular-ice": "Regular",
+  "regular-sugar": "Regular",
+  "taro-ball": "Taro",
+};
 
 function getDebugParams() {
   const params = new URLSearchParams(window.location.search);
@@ -616,6 +1281,7 @@ function createFirstPersonLookControls(camera: THREE.PerspectiveCamera, element:
   let pitch = 0;
   let smoothYaw = 0;
   let smoothPitch = 0;
+  let enabled = true;
 
   const setFromTarget = (target: THREE.Vector3) => {
     const direction = target.clone().sub(camera.position).normalize();
@@ -632,6 +1298,7 @@ function createFirstPersonLookControls(camera: THREE.PerspectiveCamera, element:
   };
 
   const onPointerDown = (event: PointerEvent) => {
+    if (!enabled) return;
     if (event.button !== 0 && event.pointerType === "mouse") return;
     dragging = true;
     lastX = event.clientX;
@@ -641,7 +1308,7 @@ function createFirstPersonLookControls(camera: THREE.PerspectiveCamera, element:
   };
 
   const onPointerMove = (event: PointerEvent) => {
-    if (!dragging) return;
+    if (!enabled || !dragging) return;
     const dx = event.clientX - lastX;
     const dy = event.clientY - lastY;
     lastX = event.clientX;
@@ -669,9 +1336,17 @@ function createFirstPersonLookControls(camera: THREE.PerspectiveCamera, element:
 
   return {
     update() {
+      if (!enabled) return;
       smoothYaw = THREE.MathUtils.lerp(smoothYaw, yaw, 0.28);
       smoothPitch = THREE.MathUtils.lerp(smoothPitch, pitch, 0.28);
       applyRotation();
+    },
+    setEnabled(next: boolean) {
+      enabled = next;
+      if (!enabled) {
+        dragging = false;
+        element.classList.remove("is-looking");
+      }
     },
     reset(target: THREE.Vector3) {
       setFromTarget(target);
@@ -1201,37 +1876,108 @@ function seededNoise(index: number, salt: number): number {
 
 function createDrinkPreview(): THREE.Group {
   const group = new THREE.Group();
-  const cup = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.12, 0.09, 0.36, 32, 1, true),
-    new THREE.MeshPhysicalMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.28,
-      roughness: 0.15,
-      transmission: 0.4,
-    }),
-  );
+  const teaMaterial = new THREE.MeshStandardMaterial({ color: 0xc98956, roughness: 0.62 });
   const tea = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.108, 0.083, 0.28, 32),
-    new THREE.MeshStandardMaterial({ color: 0xc98956, roughness: 0.65 }),
+    new THREE.CylinderGeometry(0.12, 0.09, 0.36, 40),
+    teaMaterial,
   );
-  tea.position.y = -0.025;
+  tea.position.y = -0.02;
+  const sleeve = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.122, 0.096, 0.18, 40, 1, true, -Math.PI * 0.74, Math.PI * 1.48),
+    new THREE.MeshStandardMaterial({ color: 0xf2dfaf, roughness: 0.7, side: THREE.DoubleSide }),
+  );
+  sleeve.position.y = -0.015;
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.12, 0.01, 8, 40),
+    new THREE.MeshStandardMaterial({ color: 0xffefc6, roughness: 0.42 }),
+  );
+  rim.position.y = 0.165;
+  rim.rotation.x = Math.PI / 2;
   const lid = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.13, 0.12, 0.035, 32),
+    new THREE.CylinderGeometry(0.13, 0.12, 0.035, 40),
     new THREE.MeshStandardMaterial({ color: 0xf6eadb, roughness: 0.35 }),
   );
   lid.position.y = 0.2;
-  group.add(tea, cup, lid);
+  const straw = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.008, 0.008, 0.32, 10),
+    new THREE.MeshStandardMaterial({ color: 0xb8c98f, roughness: 0.38 }),
+  );
+  straw.position.set(0.055, 0.31, 0.01);
+  straw.rotation.z = -0.18;
+  const pearls: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>[] = [];
+  group.add(tea, sleeve, rim, lid, straw);
   for (let index = 0; index < 12; index += 1) {
     const pearl = new THREE.Mesh(
-      new THREE.SphereGeometry(0.018, 12, 12),
-      new THREE.MeshStandardMaterial({ color: 0x2e1a12, roughness: 0.45 }),
+      new THREE.CircleGeometry(0.022, 24),
+      new THREE.MeshBasicMaterial({ color: 0x120906, transparent: true, opacity: 1, depthWrite: false, depthTest: false, side: THREE.DoubleSide }),
     );
-    pearl.position.set((Math.random() - 0.5) * 0.13, -0.16 + Math.random() * 0.055, (Math.random() - 0.5) * 0.13);
+    pearl.material.userData.alwaysTransparent = true;
+    const row = Math.floor(index / 4);
+    const column = index % 4;
+    const x = (column - 1.5) * 0.044 + (row % 2) * 0.012;
+    const y = 0.025 + row * 0.032;
+    const z = 0.128 + seededNoise(index, 11.2) * 0.012;
+    pearl.position.set(x, y, z);
+    pearl.visible = false;
+    pearls.push(pearl);
     group.add(pearl);
   }
   group.scale.setScalar(1.1);
+  group.userData.teaMaterial = teaMaterial;
+  group.userData.pearls = pearls;
+  group.traverse((object) => {
+    const mesh = object as THREE.Mesh<THREE.BufferGeometry, THREE.Material | THREE.Material[]>;
+    if (!mesh.isMesh) return;
+    mesh.renderOrder = 70;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach((material) => {
+      material.depthWrite = false;
+      material.depthTest = false;
+    });
+  });
+  pearls.forEach((pearl) => {
+    pearl.renderOrder = 76;
+  });
   return group;
+}
+
+function updateDrinkPreview(group: THREE.Group, order: Order) {
+  const teaMaterial = group.userData.teaMaterial as THREE.MeshStandardMaterial | undefined;
+  teaMaterial?.color.setHex(drinkColor(order));
+  const pearls = group.userData.pearls as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>[] | undefined;
+  const showPearls = orderHasPearls(order);
+  pearls?.forEach((pearl, index) => {
+    pearl.visible = showPearls;
+    pearl.scale.setScalar(showPearls && order.toppings.some((topping) => topping.id === "boba") ? 1.12 : 1);
+    pearl.position.z = 0.128 + seededNoise(index, 11.2) * 0.012;
+  });
+}
+
+function buildDrinkVisualKey(order: Order) {
+  return [order.drink?.id ?? "none", order.ice?.id ?? "none", order.toppings.map((topping) => topping.id).join(",")].join(":");
+}
+
+function orderHasPearls(order: Order) {
+  const drinkId = order.drink?.id ?? "";
+  const toppingIds = new Set(order.toppings.map((topping) => topping.id));
+  return (
+    drinkId.includes("pearl") ||
+    drinkId.includes("boba") ||
+    drinkId === "brown-sugar-boba-milk" ||
+    toppingIds.has("pearl") ||
+    toppingIds.has("boba") ||
+    toppingIds.has("mini-pearl")
+  );
+}
+
+function drinkColor(order: Order) {
+  const drinkId = order.drink?.id ?? "";
+  if (drinkId.includes("green") || drinkId === "sijichun" || drinkId === "matcha-latte") return 0x9dad66;
+  if (drinkId.includes("black-tea")) return 0x9b5537;
+  if (drinkId.includes("wintermelon")) return 0xd0a357;
+  if (drinkId.includes("taro")) return 0xba86b8;
+  if (drinkId.includes("brown-sugar")) return 0xb67749;
+  return 0xc98a58;
 }
 
 function createConfettiBurst() {
@@ -1639,8 +2385,9 @@ function setObjectOpacity(root: THREE.Object3D, opacity: number) {
       if (!material) return;
       const baseOpacity = typeof material.userData.baseOpacity === "number" ? material.userData.baseOpacity : material.opacity;
       material.userData.baseOpacity = baseOpacity;
-      material.transparent = true;
-      material.opacity = baseOpacity * opacity;
+      const nextOpacity = baseOpacity * opacity;
+      material.transparent = material.userData.alwaysTransparent === true || nextOpacity < 0.999;
+      material.opacity = nextOpacity;
     });
   });
 }

@@ -1,6 +1,6 @@
-import { drinks, iceLevels, sizes, sweetnessLevels, toppings } from "./menu";
+import { drinks, iceLevels, missingRequiredFields, orderTotal, sizes, sweetnessLevels, toppings } from "./menu";
 import type { ParsedUtterance, SideIntent } from "./parser";
-import type { GameMode, GamePhase, MenuOption, Order } from "./types";
+import type { DialogueTurn, GameMode, GamePhase, MenuOption, Order } from "./types";
 import { geminiLivePlan } from "../voice/geminiLivePlan";
 
 type PendingPrompt = "none" | "drink" | "size" | "sweetness" | "ice" | "confirm";
@@ -36,9 +36,11 @@ export async function interpretFreeFlowUtterance(args: {
   mode: GameMode;
   phase: GamePhase;
   currentOrder: Order;
+  targetOrder?: Order;
   pendingPrompt: PendingPrompt;
   pendingSuggestion?: Partial<Order>;
   localParsed: ParsedUtterance;
+  recentTurns?: DialogueTurn[];
 }): Promise<GeminiIntentResult> {
   try {
     const controller = new AbortController();
@@ -53,18 +55,24 @@ export async function interpretFreeFlowUtterance(args: {
         phase: args.phase,
         pendingPrompt: args.pendingPrompt,
         currentOrder: serializeOrder(args.currentOrder),
+        targetOrder: args.targetOrder ? serializeOrder(args.targetOrder) : undefined,
         pendingSuggestion: serializePatch(args.pendingSuggestion ?? {}),
         localParsed: serializeParsed(args.localParsed),
+        orderAfterLocalParse: serializeOrder(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch)),
+        missingFieldsBefore: missingRequiredFields(args.currentOrder, args.targetOrder),
+        missingFieldsAfterLocalParse: missingRequiredFields(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch), args.targetOrder),
+        totalAfterLocalParse: orderTotal(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch)),
+        recentTurns: serializeTurns(args.recentTurns ?? []),
         menu: serializeMenu(),
       }),
     }).finally(() => window.clearTimeout(timeout));
 
     if (!response.ok) throw new Error(`Gemini intent returned ${response.status}`);
     const payload = (await response.json()) as GeminiIntentPayload;
-    const geminiPatch = hydratePatch(payload.orderPatch);
+    const geminiPatch = hydratePatch(payload.orderPatch, args.text);
     const orderPatch = mergePatches(args.localParsed.orderPatch, geminiPatch);
     const hasOrderPatch = Object.keys(orderPatch).length > 0;
-    const sideIntent = hydrateSideIntent(payload.sideIntent) ?? (!hasOrderPatch ? args.localParsed.sideIntent : undefined);
+    const sideIntent = hasOrderPatch ? undefined : hydrateSideIntent(payload.sideIntent) ?? args.localParsed.sideIntent;
 
     return {
       parsed: {
@@ -123,6 +131,16 @@ function serializeOrder(order: Order) {
   };
 }
 
+function serializeTurns(turns: DialogueTurn[]) {
+  return turns
+    .slice(0, 6)
+    .reverse()
+    .map((turn) => ({
+      speaker: turn.speaker,
+      text: turn.text,
+    }));
+}
+
 function serializeMenu() {
   return {
     drinks: drinks.map(serializeOption),
@@ -138,10 +156,22 @@ function serializeOption(option: MenuOption) {
     id: option.id,
     label: option.label,
     aliases: option.aliases,
+    price: option.price ?? 0,
   };
 }
 
-function hydratePatch(raw: GeminiIntentPayload["orderPatch"]): Partial<Order> {
+function mergeOrderPreview(current: Order, patch: Partial<Order>): Order {
+  return {
+    quantity: patch.quantity ?? current.quantity,
+    drink: patch.drink ?? current.drink,
+    size: patch.size ?? current.size,
+    sweetness: patch.sweetness ?? current.sweetness,
+    ice: patch.ice ?? current.ice,
+    toppings: patch.toppings ?? current.toppings,
+  };
+}
+
+function hydratePatch(raw: GeminiIntentPayload["orderPatch"], transcript: string): Partial<Order> {
   if (!raw) return {};
   const patch: Partial<Order> = {};
   if (typeof raw.quantity === "number" && Number.isFinite(raw.quantity) && raw.quantity > 0) {
@@ -159,8 +189,13 @@ function hydratePatch(raw: GeminiIntentPayload["orderPatch"]): Partial<Order> {
   if (size) patch.size = size;
   if (sweetness) patch.sweetness = sweetness;
   if (ice) patch.ice = ice;
-  if (toppingHits.length) patch.toppings = toppingHits;
+  if (toppingHits.length && explicitlyAddsTopping(transcript)) patch.toppings = toppingHits;
   return patch;
+}
+
+function explicitlyAddsTopping(text: string) {
+  const normalized = text.toLowerCase().replace(/\s+/g, "");
+  return ["加", "加料", "加一份", "加一個", "加點", "多加", "配", "放", "with", "extra"].some((term) => normalized.includes(term));
 }
 
 function hydrateSideIntent(raw: GeminiIntentPayload["sideIntent"]): SideIntent | undefined {
@@ -194,7 +229,7 @@ function dedupeOptions(items: MenuOption[]) {
 function cleanCashierLine(text?: string) {
   const trimmed = text?.trim();
   if (!trimmed) return undefined;
-  return trimmed.slice(0, 140);
+  return trimmed.slice(0, 90);
 }
 
 function findById<T extends MenuOption>(items: T[], id?: string | null) {
