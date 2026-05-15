@@ -1028,24 +1028,44 @@ export default function App() {
           return;
         case "checkout": {
           if (!kioskCart.length) return;
+          const completionToken = completionTokenRef.current + 1;
+          completionTokenRef.current = completionToken;
           const nextReceipt = buildKioskReceipt(kioskCart);
+          const servedOrder = cloneOrder(nextReceipt.items[0]?.order ?? kioskCart[0].order);
+          const completeLine = "訂單完成，請取飲料。";
+          successCuePlayedRef.current = false;
+          setCurrentOrder(servedOrder);
           setKioskReceipt(nextReceipt);
           setKioskReceipts(saveKioskReceipt(nextReceipt));
           setKioskScreen("receipt");
+          setKioskOpen(false);
+          setSpeechFeedbackLabel("自助點餐");
+          setSpeechFeedbackText(completeLine);
+          setNpcLine(completeLine);
+          setPhase("serving");
+          playSuccessCue();
+          browserVoice.cancelSpeech();
+          void browserVoice.speak(completeLine, { voiceRole: "system", rate: 0.9 });
+          window.setTimeout(() => {
+            if (completionTokenRef.current !== completionToken || phaseRef.current !== "serving") return;
+            setPhase("kiosk");
+          }, drinkArrivalReceiptDelayMs);
           return;
         }
         case "newOrder":
+          completionTokenRef.current += 1;
           setKioskReceipt(undefined);
           setKioskCart([]);
           setKioskSelected(makeKioskOrder());
           setKioskScreen("drinks");
+          setPhase("kiosk");
           return;
         case "setLanguage":
           setKioskLanguage(action.language);
           return;
       }
     },
-    [kioskCart, kioskReceipt, kioskScreen, kioskSelected, markInteraction, speakKioskCue],
+    [browserVoice, kioskCart, kioskReceipt, kioskScreen, kioskSelected, markInteraction, playSuccessCue, setCurrentOrder, setPhase, speakKioskCue],
   );
 
   const completeIntro = useCallback(() => {

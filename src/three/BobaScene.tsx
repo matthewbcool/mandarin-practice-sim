@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+import { SparkRenderer, SplatMesh, type SparkRendererOptions } from "@sparkjsdev/spark";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
 import { describeOrder, drinks, iceLevels, orderTotal, sizes, sweetnessLevels, toppings } from "../game/menu";
@@ -135,10 +135,11 @@ export default function BobaScene(props: BobaSceneProps) {
     camera.position.set(debug.camera[0], debug.camera[1], debug.camera[2]);
 
     const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(debug.pixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.xr.enabled = !debug.noXr;
+    if (!debug.noXr) renderer.xr.setFramebufferScaleFactor(debug.xrFramebufferScale);
     mount.appendChild(renderer.domElement);
 
     const vrButton = debug.noXr ? undefined : VRButton.createButton(renderer);
@@ -153,11 +154,25 @@ export default function BobaScene(props: BobaSceneProps) {
     key.position.set(1.5, 3.5, 1.5);
     scene.add(key);
 
-    const spark = new SparkRenderer({ renderer });
+    const sparkOptions: SparkRendererOptions = {
+      renderer,
+      enableLod: debug.lodEnabled,
+      lodRenderScale: debug.lodRenderScale,
+      maxStdDev: debug.sparkMaxStdDev,
+    };
+    if (debug.lodSplatCount) sparkOptions.lodSplatCount = debug.lodSplatCount;
+    const spark = new SparkRenderer(sparkOptions);
     spark.frustumCulled = false;
     scene.add(spark);
 
-    const splat = debug.simpleSplat ? new SplatMesh({}) : new SplatMesh({ url: WORLD_URL });
+    const splat = debug.simpleSplat
+      ? new SplatMesh({})
+      : new SplatMesh({
+          url: WORLD_URL,
+          lod: debug.lodEnabled,
+          enableLod: debug.lodEnabled,
+          lodScale: debug.splatLodScale,
+        });
     if (debug.flipSplat) splat.quaternion.set(1, 0, 0, 0);
     splat.position.set(debug.splat[0], debug.splat[1], debug.splat[2]);
     splat.scale.setScalar(debug.splatScale);
@@ -519,8 +534,10 @@ export default function BobaScene(props: BobaSceneProps) {
     renderer.setAnimationLoop(() => {
       const elapsed = clock.getElapsedTime();
       const state = propsRef.current;
-      const receiptVisible = state.phase === "receipt" && Boolean(state.receipt);
       const kioskMode = state.experience === "kiosk";
+      const receiptVisible = state.phase === "receipt" && Boolean(state.receipt);
+      const kioskReceiptOrder = kioskMode ? state.kioskView.receipt?.items[0]?.order : undefined;
+      const kioskReceiptVisible = Boolean(kioskReceiptOrder);
       const presentingXr = renderer.xr.isPresenting;
       receiptDisplay.hitArea.visible = receiptVisible;
       kiosk.group.visible = kioskMode;
@@ -616,8 +633,8 @@ export default function BobaScene(props: BobaSceneProps) {
       wasCelebrating = celebrating;
       confetti.update(elapsed);
 
-      const drinkVisible = celebrating || receiptVisible;
-      const drinkOrder = state.receipt?.recognized ?? state.currentOrder;
+      const drinkVisible = celebrating || receiptVisible || kioskReceiptVisible;
+      const drinkOrder = state.receipt?.recognized ?? kioskReceiptOrder ?? state.currentOrder;
       const drinkVisualKey = buildDrinkVisualKey(drinkOrder);
       if (drinkVisualKey !== lastDrinkVisualKey) {
         lastDrinkVisualKey = drinkVisualKey;
@@ -625,11 +642,11 @@ export default function BobaScene(props: BobaSceneProps) {
       }
       const drinkOpacity = receiptVisible ? 1 - receiptFocusAmount : 1;
       drink.visible = drinkVisible && drinkOpacity > 0.03;
-      const targetDrinkPosition = celebrating ? celebrationDrinkPosition : receiptVisible ? receiptDrinkPosition : counterDrinkPosition;
+      const targetDrinkPosition = celebrating ? celebrationDrinkPosition : receiptVisible || kioskReceiptVisible ? receiptDrinkPosition : counterDrinkPosition;
       drink.position.lerp(targetDrinkPosition, 0.22);
       const receiptDrinkScale = THREE.MathUtils.lerp(1.08, 0.72, receiptFocusAmount);
-      drink.scale.setScalar(celebrating ? 1.38 + Math.sin(elapsed * 5.5) * 0.026 : receiptVisible ? receiptDrinkScale : 1);
-      drink.rotation.y = celebrating ? elapsed * 1.6 : receiptVisible ? Math.sin(elapsed * 1.2) * 0.08 : Math.sin(elapsed * 1.2) * 0.16;
+      drink.scale.setScalar(celebrating ? 1.38 + Math.sin(elapsed * 5.5) * 0.026 : receiptVisible || kioskReceiptVisible ? receiptDrinkScale : 1);
+      drink.rotation.y = celebrating ? elapsed * 1.6 : receiptVisible || kioskReceiptVisible ? Math.sin(elapsed * 1.2) * 0.08 : Math.sin(elapsed * 1.2) * 0.16;
       drink.rotation.z = celebrating ? Math.sin(elapsed * 4.2) * 0.035 : 0;
       setObjectOpacity(drink, drinkOpacity);
 
@@ -1271,6 +1288,7 @@ const shortEnglishOptionLabels: Record<string, string> = {
 
 function getDebugParams() {
   const params = new URLSearchParams(window.location.search);
+  const questLike = isQuestLikeDevice();
   const tuple = (name: string, fallback: [number, number, number]) => {
     const raw = params.get(name);
     if (!raw) return fallback;
@@ -1283,6 +1301,16 @@ function getDebugParams() {
     const value = Number(raw);
     return Number.isFinite(value) ? value : fallback;
   };
+  const optionalNumberParam = (name: string, fallback?: number) => {
+    const raw = params.get(name);
+    if (raw === null) return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const boundedNumberParam = (name: string, fallback: number, min: number, max: number) => {
+    return THREE.MathUtils.clamp(numberParam(name, fallback), min, max);
+  };
+  const defaultPixelRatio = questLike ? 1 : Math.min(window.devicePixelRatio, 2);
 
   return {
     bare: params.get("bare") === "1",
@@ -1295,7 +1323,18 @@ function getDebugParams() {
     splat: tuple("splat", [0, 0, 0]),
     splatScale: numberParam("splatScale", 1),
     fov: numberParam("fov", 62),
+    pixelRatio: boundedNumberParam("pixelRatio", defaultPixelRatio, 0.5, 2),
+    xrFramebufferScale: boundedNumberParam("xrScale", questLike ? 0.72 : 1, 0.5, 1.25),
+    lodEnabled: params.get("lod") !== "0",
+    lodSplatCount: optionalNumberParam("lodSplatCount", questLike ? 450_000 : undefined),
+    lodRenderScale: boundedNumberParam("lodRenderScale", questLike ? 1.75 : 1.25, 1, 5),
+    sparkMaxStdDev: boundedNumberParam("maxStdDev", Math.sqrt(5), Math.sqrt(4), Math.sqrt(9)),
+    splatLodScale: boundedNumberParam("splatLodScale", questLike ? 0.85 : 1, 0.25, 2),
   };
+}
+
+function isQuestLikeDevice() {
+  return /Quest|OculusBrowser|Meta Quest/i.test(navigator.userAgent);
 }
 
 function createFirstPersonLookControls(camera: THREE.PerspectiveCamera, element: HTMLElement, initialTarget: THREE.Vector3) {
