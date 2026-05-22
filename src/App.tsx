@@ -38,7 +38,7 @@ const npcSpeechSafetyMs = 5200;
 const postNpcAudioTailMs = 120;
 const postNpcInterruptDelayMs = 80;
 const drinkArrivalReceiptDelayMs = 4600;
-const cashierBreakLine = "我先休息一下，請用旁邊的自助點餐機喔。";
+const cashierBreakLine = "Cashier voice is off in Public Mode. Please use the self-ordering kiosk.";
 
 type PendingOrderPrompt = "none" | "drink" | "size" | "sweetness" | "ice" | "confirm";
 type CashierPrompt = {
@@ -62,9 +62,9 @@ function byId<T extends { id: string }>(items: T[], id: string): T {
 }
 
 function readStoredKioskLanguage(): KioskLanguage {
-  if (typeof window === "undefined") return "mix";
+  if (typeof window === "undefined") return "en";
   const stored = window.localStorage.getItem(kioskLanguageStorageKey);
-  return stored === "en" || stored === "zh" || stored === "mix" ? stored : "mix";
+  return stored === "zh" ? "zh" : "en";
 }
 
 function buildIntroPanels() {
@@ -72,7 +72,7 @@ function buildIntroPanels() {
     {
       kicker: "Welcome",
       title: "Welcome to the boba tea ordering simulator",
-      body: "Practice a real drink-shop conversation: study the menu, place an order, answer follow-up questions, and try again until it clicks.",
+      body: "Use the kiosk to practice a complete drink order. When Cashier Voice is enabled, the barista will ask questions and you answer out loud.",
     },
     {
       kicker: "Controls",
@@ -81,8 +81,8 @@ function buildIntroPanels() {
     },
     {
       kicker: "Cashier",
-      title: "Use the kiosk when the cashier is away",
-      body: "The cashier is only available during certain demo windows to save compute. If she is on a break, use the self-ordering kiosk to study the menu and practice the flow.",
+      title: "Public Mode means kiosk-only",
+      body: "If the badge says Public Mode, the barista is on break and will not start a voice conversation. Tap the kiosk screen, choose English or Chinese, and place the order there.",
     },
   ] as const;
 }
@@ -95,15 +95,15 @@ function getPlatformControlInstructions() {
   const userAgent = navigator.userAgent.toLowerCase();
   const headset = /quest|oculus|vive|pico|xr|vr/.test(userAgent);
   if (headset) {
-    return "In headset: use your controller ray or gaze to aim, then select the cashier or kiosk controls.";
+    return "In headset: use your controller ray or gaze to aim. Use kiosk buttons in Public Mode; speak only when Cashier Voice is enabled.";
   }
 
   const touch = window.matchMedia?.("(pointer: coarse)").matches;
   if (touch) {
-    return "On mobile or tablet: swipe to look around, then tap the cashier or kiosk controls.";
+    return "On mobile or tablet: swipe to look around, then tap the kiosk. Use the talk button only when Cashier Voice is enabled.";
   }
 
-  return "On desktop: drag to look around, click controls, and use the talk button when it appears.";
+  return "On desktop: drag to look around and click the kiosk. Use the talk button only when Cashier Voice is enabled.";
 }
 
 function cloneOrder(order: Order): Order {
@@ -494,9 +494,9 @@ export default function App() {
     setPhase("kiosk");
     setAutoListen(false);
     setMicReady(false);
-    setNpcLine("店員先去休息了，請用自助點餐機。");
-    setSpeechFeedbackLabel("自助點餐");
-    setSpeechFeedbackText("點一下櫃台上的螢幕開始。");
+    setNpcLine(cashierBreakLine);
+    setSpeechFeedbackLabel("Public Mode");
+    setSpeechFeedbackText("Cashier voice is off. Tap the kiosk screen to place an order.");
   }, [experience, introComplete, resetRoundState, setPhase]);
 
   const enterOrdering = useCallback(async () => {
@@ -1129,7 +1129,7 @@ export default function App() {
           <span>珍奶快打</span>
           <small>{experience === "kiosk" ? "自助點餐" : mode === "arcade" ? `第 ${roundIndex + 1} 關` : "自由模式"}</small>
         </div>
-        {!liveRound && <div className="status-pill" title={geminiLivePlan.model}>
+        {!liveRound && <div className="status-pill" title={experience === "kiosk" ? "Cashier voice is off. Use the kiosk to order." : geminiLivePlan.model}>
           {runtimeStatus.loaded
             ? experience === "cashier"
               ? "Cashier voice"

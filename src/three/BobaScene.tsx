@@ -869,7 +869,7 @@ function createKioskTablet(): KioskTablet {
   tablet.update(
     {
       screen: "drinks",
-      language: "mix",
+      language: "en",
       drinkPage: 0,
       selected: { quantity: 1, toppings: [] },
       cart: [],
@@ -962,9 +962,9 @@ function drawKioskHeader(ctx: CanvasRenderingContext2D, view: KioskViewModel, bu
   ctx.font = "850 23px system-ui, sans-serif";
   ctx.fillText(`${copy("cart", view.language)} ${view.cart.length} / ${total} 元`, 276, 64);
 
-  const languages: KioskLanguage[] = ["mix", "en", "zh"];
+  const languages: KioskLanguage[] = ["en", "zh"];
   languages.forEach((language, index) => {
-    addKioskButton(ctx, buttons, 610 + index * 90, 34, 76, 46, languageLabel(language), { type: "setLanguage", language }, {
+    addKioskButton(ctx, buttons, 706 + index * 90, 34, 76, 46, languageLabel(language), { type: "setLanguage", language }, {
       tone: language === view.language ? "primary" : undefined,
       small: true,
     });
@@ -1173,32 +1173,32 @@ function buildKioskRenderKey(open: boolean, view: KioskViewModel) {
 }
 
 function copy(key: string, language: KioskLanguage) {
-  const dictionary: Record<string, { en: string; zh: string; mix: string }> = {
-    add: { en: "Add to cart", zh: "加入購物車", mix: "加入 Add" },
-    addMore: { en: "Add more", zh: "繼續加點", mix: "加點 More" },
-    back: { en: "Back", zh: "返回", mix: "Back 返回" },
-    cart: { en: "Cart", zh: "購物車", mix: "Cart 購物車" },
-    checkout: { en: "Checkout", zh: "結帳", mix: "Checkout 結帳" },
-    chooseDrink: { en: "Choose a drink", zh: "選擇飲料", mix: "Choose 飲料" },
-    clear: { en: "Clear", zh: "清空", mix: "Clear 清空" },
-    done: { en: "Done", zh: "完成", mix: "Done 完成" },
-    emptyCart: { en: "Your cart is empty", zh: "購物車是空的", mix: "Cart is empty" },
-    ice: { en: "Ice", zh: "冰塊", mix: "Ice 冰塊" },
-    lineTotal: { en: "Item total", zh: "小計", mix: "Item 小計" },
-    newOrder: { en: "New order", zh: "新訂單", mix: "New 新訂單" },
-    next: { en: "Next", zh: "下一頁", mix: "Next 下一頁" },
-    previous: { en: "Previous", zh: "上一頁", mix: "Prev 上一頁" },
-    publicMode: { en: "Public Mode", zh: "公開模式", mix: "Public Mode" },
-    receipt: { en: "Receipt", zh: "收據", mix: "Receipt 收據" },
-    remove: { en: "Remove", zh: "移除", mix: "Remove" },
-    size: { en: "Size", zh: "杯型", mix: "Size 杯型" },
-    start: { en: "Start order", zh: "開始點餐", mix: "Start 點餐" },
-    sweetness: { en: "Sweetness", zh: "甜度", mix: "Sweet 甜度" },
-    tapToOrder: { en: "Tap to order", zh: "點一下開始點餐", mix: "Tap to order" },
-    title: { en: "Boba Kiosk", zh: "珍奶自助點餐", mix: "Boba 自助點餐" },
-    toppings: { en: "Toppings", zh: "加料", mix: "Toppings 加料" },
-    total: { en: "Total", zh: "總計", mix: "Total 總計" },
-    viewCart: { en: "View cart", zh: "查看購物車", mix: "View Cart" },
+  const dictionary: Record<string, { en: string; zh: string }> = {
+    add: { en: "Add to cart", zh: "加入購物車" },
+    addMore: { en: "Add more", zh: "繼續加點" },
+    back: { en: "Back", zh: "返回" },
+    cart: { en: "Cart", zh: "購物車" },
+    checkout: { en: "Checkout", zh: "結帳" },
+    chooseDrink: { en: "Choose a drink", zh: "選擇飲料" },
+    clear: { en: "Clear", zh: "清空" },
+    done: { en: "Done", zh: "完成" },
+    emptyCart: { en: "Your cart is empty", zh: "購物車是空的" },
+    ice: { en: "Ice", zh: "冰塊" },
+    lineTotal: { en: "Item total", zh: "小計" },
+    newOrder: { en: "New order", zh: "新訂單" },
+    next: { en: "Next", zh: "下一頁" },
+    previous: { en: "Previous", zh: "上一頁" },
+    publicMode: { en: "Public Mode", zh: "公開模式" },
+    receipt: { en: "Receipt", zh: "收據" },
+    remove: { en: "Remove", zh: "移除" },
+    size: { en: "Size", zh: "杯型" },
+    start: { en: "Start order", zh: "開始點餐" },
+    sweetness: { en: "Sweetness", zh: "甜度" },
+    tapToOrder: { en: "Tap to order", zh: "點一下開始點餐" },
+    title: { en: "Boba Kiosk", zh: "珍奶自助點餐" },
+    toppings: { en: "Toppings", zh: "加料" },
+    total: { en: "Total", zh: "總計" },
+    viewCart: { en: "View cart", zh: "查看購物車" },
   };
   return dictionary[key]?.[language] ?? key;
 }
@@ -1206,14 +1206,12 @@ function copy(key: string, language: KioskLanguage) {
 function optionLabel(option: MenuOption, language: KioskLanguage) {
   const english = englishOptionLabels[option.id] ?? option.label;
   if (language === "en") return english;
-  if (language === "zh") return option.label;
-  return `${option.label} ${shortEnglishOptionLabels[option.id] ?? english}`;
+  return option.label;
 }
 
 function languageLabel(language: KioskLanguage) {
   if (language === "en") return "EN";
-  if (language === "zh") return "中文";
-  return "Mix";
+  return "中文";
 }
 
 const englishOptionLabels: Record<string, string> = {
@@ -1259,31 +1257,6 @@ const englishOptionLabels: Record<string, string> = {
   "tieguanyin-milk-tea": "Tieguanyin Milk Tea",
   "wintermelon-lemon": "Wintermelon Lemon",
   "yakult-green-tea": "Yakult Green Tea",
-};
-
-const shortEnglishOptionLabels: Record<string, string> = {
-  "agar": "Agar",
-  "aiyu": "Aiyu",
-  "boba": "Boba",
-  "coconut-jelly": "Coconut",
-  "grass-jelly": "Grass",
-  "half-sugar": "Half",
-  "hot": "Hot",
-  "large": "Large",
-  "less-ice": "Less Ice",
-  "less-sugar": "Less",
-  "light-ice": "Light Ice",
-  "light-sugar": "Light",
-  "medium": "Med",
-  "milk-foam": "Foam",
-  "mini-pearl": "Mini",
-  "no-ice": "No Ice",
-  "no-sugar": "No Sugar",
-  "pearl": "Pearls",
-  "pudding": "Pudding",
-  "regular-ice": "Regular",
-  "regular-sugar": "Regular",
-  "taro-ball": "Taro",
 };
 
 function getDebugParams() {

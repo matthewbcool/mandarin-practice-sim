@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@google/genai": "^2.0.1",
-    "@sparkjsdev/spark": "^2.0.0",
+    "@sparkjsdev/spark": "^2.1.0",
     "@vitejs/plugin-react": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

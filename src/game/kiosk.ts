@@ -1,7 +1,7 @@
 import { describeOrder, drinks, iceLevels, orderTotal, sizes, sweetnessLevels } from "./menu";
 import type { MenuOption, Order } from "./types";
 
-export type KioskLanguage = "mix" | "en" | "zh";
+export type KioskLanguage = "en" | "zh";
 export type KioskScreen = "drinks" | "customize" | "cart" | "receipt";
 
 export interface KioskCartItem {
