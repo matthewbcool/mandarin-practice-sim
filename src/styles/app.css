@@ -254,6 +254,149 @@ main {
   line-height: 1.55;
 }
 
+.scenario-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(24, 18, 14, 0.72);
+  backdrop-filter: blur(16px);
+}
+
+.scenario-shell {
+  width: min(880px, calc(100vw - 32px));
+  display: grid;
+  gap: 15px;
+}
+
+.scenario-carousel {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 14px;
+}
+
+.scenario-track {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.scenario-nav {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: var(--cream-soft);
+  background: rgba(241, 231, 200, 0.12);
+  border: 1px solid rgba(241, 231, 200, 0.2);
+  font-size: 26px;
+  line-height: 1;
+}
+
+.scenario-card {
+  width: min(720px, 100%);
+  min-height: 238px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 1.25fr) minmax(220px, 0.75fr);
+  overflow: hidden;
+  color: var(--cream-soft);
+  background: rgba(48, 45, 24, 0.9);
+  border: 1px solid rgba(241, 231, 200, 0.22);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.48);
+  text-align: left;
+}
+
+.scenario-card:hover,
+.scenario-card:focus-visible,
+.scenario-card--active {
+  color: var(--cream-soft);
+  background: rgba(58, 53, 29, 0.94);
+  outline: 2px solid rgba(184, 201, 143, 0.8);
+  outline-offset: 4px;
+}
+
+.scenario-shot {
+  min-width: 0;
+  min-height: 238px;
+  aspect-ratio: 16 / 9;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.scenario-shot img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.scenario-copy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 9px;
+  padding: 24px;
+}
+
+.scenario-copy strong {
+  color: var(--matcha);
+  font-size: 18px;
+  line-height: 1.12;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.scenario-copy span {
+  color: rgba(255, 245, 216, 0.8);
+  line-height: 1.45;
+}
+
+.scenario-load-meta {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  color: rgba(255, 245, 216, 0.86);
+  font-weight: 850;
+}
+
+.loading-progress {
+  height: 13px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 245, 216, 0.18);
+  border: 1px solid rgba(241, 231, 200, 0.18);
+}
+
+.loading-progress i {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--matcha), #f1d384);
+  transition: width 180ms ease;
+}
+
+.scenario-shell p {
+  margin: 0;
+  color: rgba(255, 245, 216, 0.78);
+  line-height: 1.45;
+}
+
+.scenario-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.scenario-actions button {
+  min-width: 132px;
+}
+
 .intro-loader {
   position: fixed;
   left: 50%;
@@ -684,6 +827,7 @@ main {
   bottom: 18px !important;
   left: auto !important;
   border-radius: 8px !important;
+  z-index: 60 !important;
 }
 
 @keyframes fadeIn {
@@ -707,6 +851,49 @@ main {
 }
 
 @media (max-width: 720px) {
+  .scenario-loader {
+    place-items: start center;
+    padding: 18px 16px 92px;
+    overflow-y: auto;
+  }
+
+  .scenario-shell {
+    width: 100%;
+    gap: 13px;
+  }
+
+  .scenario-carousel {
+    grid-template-columns: 36px minmax(0, 1fr) 36px;
+    gap: 8px;
+  }
+
+  .scenario-nav {
+    width: 36px;
+    height: 36px;
+  }
+
+  .scenario-card {
+    min-height: 0;
+    grid-template-columns: 1fr;
+  }
+
+  .scenario-shot {
+    min-height: 172px;
+    aspect-ratio: 16 / 9;
+  }
+
+  .scenario-copy {
+    padding: 18px;
+  }
+
+  .scenario-copy strong {
+    font-size: 18px;
+  }
+
+  .scenario-actions button {
+    width: 100%;
+  }
+
   .hud--top {
     align-items: flex-start;
   }

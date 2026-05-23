@@ -9,6 +9,12 @@ import type { GamePhase, MenuOption, Order, Receipt } from "../game/types";
 
 export type FocusTarget = "cashier" | "line" | "kiosk" | "receipt" | "none";
 export type SceneExperience = "cashier" | "kiosk";
+export interface SceneLoadProgress {
+  scenarioId: string;
+  progress: number;
+  status: string;
+  ready: boolean;
+}
 export interface CashierPoseTuning {
   rootY: number;
   rootZ: number;
@@ -42,6 +48,7 @@ export interface CashierPoseTuning {
 }
 
 interface BobaSceneProps {
+  scenarioId: string;
   phase: GamePhase;
   experience: SceneExperience;
   listening: boolean;
@@ -59,7 +66,13 @@ interface BobaSceneProps {
   onReceiptAdvance?: () => void;
   onKioskAction?: (action: KioskAction) => void;
   onCashierBreak?: () => void;
-  onSceneReady?: () => void;
+  loadingActive: boolean;
+  loadingTitle: string;
+  loadingStatus: string;
+  loadingProgress: number;
+  loadingReady: boolean;
+  onLoadingEnter?: () => void;
+  onSceneLoadProgress?: (progress: SceneLoadProgress) => void;
 }
 
 const WORLD_URL = "/assets/world/cozy-boba-shop.spz";
@@ -69,6 +82,13 @@ const CUSTOMER_URL = "/assets/characters/universal-base/Superhero_Male_FullBody.
 const CASHIER_POS: [number, number, number] = [0, 0.097, -2];
 const CASHIER_SCALE = 0.99;
 const RECEIPT_GAZE_FOCUS_SECONDS = 0.9;
+type LoadStage = "world" | "cashier" | "collider" | "firstFrame";
+const sceneLoadWeights: Record<LoadStage, number> = {
+  world: 0.6,
+  cashier: 0.15,
+  collider: 0.1,
+  firstFrame: 0.15,
+};
 export const DEFAULT_CASHIER_POSE: CashierPoseTuning = {
   rootY: 0,
   rootZ: 0,
@@ -131,6 +151,56 @@ export default function BobaScene(props: BobaSceneProps) {
     scene.background = new THREE.Color(0x201714);
 
     const debug = getDebugParams();
+    let disposed = false;
+    let loadStatus = "Preparing Boba Tea Shop...";
+    const loadStages: Record<LoadStage, number> = {
+      world: 0,
+      cashier: debug.bare ? 1 : 0,
+      collider: debug.bare ? 1 : 0,
+      firstFrame: 0,
+    };
+    const warmupTimers: number[] = [];
+    const reportSceneLoad = () => {
+      if (disposed) return;
+      const progress = (Object.keys(sceneLoadWeights) as LoadStage[]).reduce((sum, stage) => {
+        return sum + loadStages[stage] * sceneLoadWeights[stage];
+      }, 0);
+      const ready = progress >= 0.999;
+      propsRef.current.onSceneLoadProgress?.({
+        scenarioId: propsRef.current.scenarioId,
+        progress: THREE.MathUtils.clamp(progress, 0, 1),
+        status: ready ? "Ready" : loadStatus,
+        ready,
+      });
+    };
+    const setLoadStage = (stage: LoadStage, value: number, status?: string) => {
+      if (disposed) return;
+      const nextValue = THREE.MathUtils.clamp(value, 0, 1);
+      const nextStatus = status ?? loadStatus;
+      if (nextValue <= loadStages[stage] + 0.002 && nextStatus === loadStatus) return;
+      loadStages[stage] = Math.max(loadStages[stage], nextValue);
+      loadStatus = nextStatus;
+      reportSceneLoad();
+    };
+    const warmStageTo = (stage: LoadStage, cap: number, status: string, durationMs: number) => {
+      const start = performance.now();
+      const timer = window.setInterval(() => {
+        if (disposed || loadStages[stage] >= 1) {
+          window.clearInterval(timer);
+          return;
+        }
+        const elapsedRatio = THREE.MathUtils.clamp((performance.now() - start) / durationMs, 0, 1);
+        const eased = 1 - (1 - elapsedRatio) * (1 - elapsedRatio);
+        setLoadStage(stage, cap * eased, status);
+      }, 180);
+      warmupTimers.push(timer);
+    };
+    const progressFromEvent = (event: ProgressEvent<EventTarget>, cap: number, fallback: number) => {
+      if (event.lengthComputable && event.total > 0) return Math.min(cap, event.loaded / event.total);
+      return fallback;
+    };
+    reportSceneLoad();
+
     const camera = new THREE.PerspectiveCamera(debug.fov, mount.clientWidth / mount.clientHeight, 0.02, 80);
     camera.position.set(debug.camera[0], debug.camera[1], debug.camera[2]);
 
@@ -172,6 +242,8 @@ export default function BobaScene(props: BobaSceneProps) {
           lod: debug.lodEnabled,
           enableLod: debug.lodEnabled,
           lodScale: debug.splatLodScale,
+          onProgress: (event) => setLoadStage("world", progressFromEvent(event, 0.94, 0.4), "Loading Boba Tea Shop..."),
+          onLoad: () => setLoadStage("world", 0.97, "Initializing world..."),
         });
     if (debug.flipSplat) splat.quaternion.set(1, 0, 0, 0);
     splat.position.set(debug.splat[0], debug.splat[1], debug.splat[2]);
@@ -189,6 +261,15 @@ export default function BobaScene(props: BobaSceneProps) {
       const box = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), new THREE.MeshBasicMaterial({ color: 0xffd58d }));
       box.position.set(0, 1.45, -1.4);
       scene.add(box);
+      setLoadStage("world", 1, "World ready");
+    } else {
+      warmStageTo("world", 0.92, "Loading Boba Tea Shop...", 12000);
+      void splat.initialized
+        .then(() => setLoadStage("world", 1, "World ready"))
+        .catch((error) => {
+          console.warn("World splat failed to initialize.", error);
+          setLoadStage("world", 1, "World unavailable; continuing.");
+        });
     }
     scene.add(splat);
 
@@ -296,41 +377,53 @@ export default function BobaScene(props: BobaSceneProps) {
     speechPanel.sprite.visible = false;
     scene.add(speechPanel.sprite);
 
+    const loadingPanel = createLoadingPanelSprite();
+    loadingPanel.sprite.visible = false;
+    scene.add(loadingPanel.sprite);
+
     const loader = new GLTFLoader();
-    if (!debug.bare) loader.load(
-      CASHIER_URL,
-      (gltf) => {
-        cashierRoot = gltf.scene;
-        cashierRoot.name = "cashier";
-        applyCashierRootPose(cashierRoot, propsRef.current.cashierPose);
-        cashierRoot.rotation.y = 0;
-        cashierDefaultRotationY = cashierRoot.rotation.y;
-        cashierRoot.traverse((child) => {
-          child.userData.focusTarget = "cashier";
-          if ((child as THREE.Mesh).isMesh) {
-            focusObjects.push(child);
-            const material = (child as THREE.Mesh).material;
-            if (Array.isArray(material)) material.forEach(softenMaterial);
-            else softenMaterial(material);
-          }
-        });
-        poseCashierAvatar(cashierRoot, propsRef.current.cashierPose);
-        cashierBlink = createCashierBlinkController(cashierRoot);
-        scene.add(cashierRoot);
-        animatedCharacters.push(cashierRoot);
-      },
-      undefined,
-      () => {
-        cashierRoot = createFallbackCharacter(0xffc3a5);
-        applyCashierRootPose(cashierRoot, propsRef.current.cashierPose);
-        cashierRoot.rotation.y = Math.PI;
-        cashierDefaultRotationY = cashierRoot.rotation.y;
-        cashierRoot.userData.focusTarget = "cashier";
-        focusObjects.push(cashierRoot);
-        scene.add(cashierRoot);
-        animatedCharacters.push(cashierRoot);
-      },
-    );
+    if (!debug.bare) {
+      warmStageTo("cashier", 0.82, "Loading cashier...", 7000);
+      loader.load(
+        CASHIER_URL,
+        (gltf) => {
+          if (disposed) return;
+          cashierRoot = gltf.scene;
+          cashierRoot.name = "cashier";
+          applyCashierRootPose(cashierRoot, propsRef.current.cashierPose);
+          cashierRoot.rotation.y = 0;
+          cashierDefaultRotationY = cashierRoot.rotation.y;
+          cashierRoot.traverse((child) => {
+            child.userData.focusTarget = "cashier";
+            if ((child as THREE.Mesh).isMesh) {
+              focusObjects.push(child);
+              const material = (child as THREE.Mesh).material;
+              if (Array.isArray(material)) material.forEach(softenMaterial);
+              else softenMaterial(material);
+            }
+          });
+          poseCashierAvatar(cashierRoot, propsRef.current.cashierPose);
+          cashierBlink = createCashierBlinkController(cashierRoot);
+          scene.add(cashierRoot);
+          animatedCharacters.push(cashierRoot);
+          setLoadStage("cashier", 1, "Cashier ready");
+        },
+        (event) => setLoadStage("cashier", progressFromEvent(event, 0.9, 0.5), "Loading cashier..."),
+        (error) => {
+          if (disposed) return;
+          console.warn("Cashier avatar failed to load; using fallback.", error);
+          cashierRoot = createFallbackCharacter(0xffc3a5);
+          applyCashierRootPose(cashierRoot, propsRef.current.cashierPose);
+          cashierRoot.rotation.y = Math.PI;
+          cashierDefaultRotationY = cashierRoot.rotation.y;
+          cashierRoot.userData.focusTarget = "cashier";
+          focusObjects.push(cashierRoot);
+          scene.add(cashierRoot);
+          animatedCharacters.push(cashierRoot);
+          setLoadStage("cashier", 1, "Cashier ready");
+        },
+      );
+    }
 
     if (!debug.bare && debug.gltfCharacters) loader.load(
       CUSTOMER_URL,
@@ -399,11 +492,24 @@ export default function BobaScene(props: BobaSceneProps) {
       });
     }
 
-    loader.load(COLLIDER_URL, (gltf) => {
-      gltf.scene.visible = false;
-      gltf.scene.name = "world-collider";
-      scene.add(gltf.scene);
-    });
+    if (!debug.bare) {
+      warmStageTo("collider", 0.76, "Preparing movement...", 5000);
+      loader.load(
+        COLLIDER_URL,
+        (gltf) => {
+          if (disposed) return;
+          gltf.scene.visible = false;
+          gltf.scene.name = "world-collider";
+          scene.add(gltf.scene);
+          setLoadStage("collider", 1, "Movement ready");
+        },
+        (event) => setLoadStage("collider", progressFromEvent(event, 0.9, 0.5), "Preparing movement..."),
+        (error) => {
+          console.warn("World collider failed to load; continuing without collider.", error);
+          setLoadStage("collider", 1, "Movement ready");
+        },
+      );
+    }
 
     const raycaster = new THREE.Raycaster();
     const center = new THREE.Vector2(0, 0);
@@ -434,8 +540,12 @@ export default function BobaScene(props: BobaSceneProps) {
     const xrControllerRayOrigin = new THREE.Vector3();
     const xrControllerRayDirection = new THREE.Vector3();
     const xrControllerMatrix = new THREE.Matrix4();
+    const loadingPanelForward = new THREE.Vector3();
+    const loadingPanelPosition = new THREE.Vector3();
     let wasKioskOpen = false;
     let lastKioskRenderKey = "";
+    let lastLoadingPanelKey = "";
+    let firstSceneFrameSettled = false;
 
     const onResize = () => {
       const width = mount.clientWidth;
@@ -464,6 +574,10 @@ export default function BobaScene(props: BobaSceneProps) {
     let pointerDownY = 0;
     const handleSelectionFromRaycaster = () => {
       const state = propsRef.current;
+      if (state.loadingActive) {
+        if (state.loadingReady) state.onLoadingEnter?.();
+        return;
+      }
       const receiptVisible = state.phase === "receipt" && Boolean(state.receipt);
       const hits = raycaster.intersectObjects(focusObjects, true);
       const hit = hits.find((item) => {
@@ -529,7 +643,6 @@ export default function BobaScene(props: BobaSceneProps) {
     });
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
-    window.setTimeout(() => propsRef.current.onSceneReady?.(), 0);
 
     renderer.setAnimationLoop(() => {
       const elapsed = clock.getElapsedTime();
@@ -539,13 +652,30 @@ export default function BobaScene(props: BobaSceneProps) {
       const kioskReceiptOrder = kioskMode ? state.kioskView.receipt?.items[0]?.order : undefined;
       const kioskReceiptVisible = Boolean(kioskReceiptOrder);
       const presentingXr = renderer.xr.isPresenting;
-      receiptDisplay.hitArea.visible = receiptVisible;
+      const loadingActive = state.loadingActive;
+      receiptDisplay.hitArea.visible = receiptVisible && !loadingActive;
       kiosk.group.visible = kioskMode;
-      kiosk.hitArea.visible = kioskMode;
+      kiosk.hitArea.visible = kioskMode && !loadingActive;
       const kioskRenderKey = buildKioskRenderKey(state.kioskOpen, state.kioskView);
       if (kioskMode && kioskRenderKey !== lastKioskRenderKey) {
         lastKioskRenderKey = kioskRenderKey;
         kiosk.update(state.kioskView, state.kioskOpen);
+      }
+
+      loadingPanel.sprite.visible = loadingActive && presentingXr;
+      if (loadingPanel.sprite.visible) {
+        const panelKey = `${state.loadingTitle}|${state.loadingStatus}|${state.loadingProgress}|${state.loadingReady}`;
+        if (panelKey !== lastLoadingPanelKey) {
+          lastLoadingPanelKey = panelKey;
+          loadingPanel.update(state.loadingTitle, state.loadingStatus, state.loadingProgress, state.loadingReady);
+        }
+        const viewCamera = renderer.xr.getCamera();
+        viewCamera.updateMatrixWorld();
+        viewCamera.getWorldDirection(loadingPanelForward);
+        loadingPanelPosition.setFromMatrixPosition(viewCamera.matrixWorld).addScaledVector(loadingPanelForward, 1.45);
+        loadingPanelPosition.y -= 0.08;
+        loadingPanel.sprite.position.copy(loadingPanelPosition);
+        loadingPanel.sprite.scale.set(0.9, 0.45, 1);
       }
 
       if (presentingXr) {
@@ -577,7 +707,7 @@ export default function BobaScene(props: BobaSceneProps) {
         if (focus === "kiosk" && !kioskMode) return false;
         return focus !== "receipt" || receiptVisible;
       });
-      const target = (focusHit?.object.userData.focusTarget as FocusTarget | undefined) ?? "none";
+      const target = loadingActive ? "none" : (focusHit?.object.userData.focusTarget as FocusTarget | undefined) ?? "none";
       if (target !== lastFocusTarget) {
         lastFocusTarget = target;
         propsRef.current.onFocusTargetChange(target);
@@ -626,14 +756,14 @@ export default function BobaScene(props: BobaSceneProps) {
         character.rotation.z = Math.sin(elapsed * 1.2 + index) * 0.01;
       });
 
-      exclamation.visible = state.experience === "cashier" && target === "cashier" && state.listening;
+      exclamation.visible = !loadingActive && state.experience === "cashier" && target === "cashier" && state.listening;
       exclamation.scale.setScalar(0.34 + Math.sin(elapsed * 7) * 0.03);
       const celebrating = state.phase === "serving";
       if (celebrating && !wasCelebrating) confetti.start(elapsed);
       wasCelebrating = celebrating;
       confetti.update(elapsed);
 
-      const drinkVisible = celebrating || receiptVisible || kioskReceiptVisible;
+      const drinkVisible = !loadingActive && (celebrating || receiptVisible || kioskReceiptVisible);
       const drinkOrder = state.receipt?.recognized ?? kioskReceiptOrder ?? state.currentOrder;
       const drinkVisualKey = buildDrinkVisualKey(drinkOrder);
       if (drinkVisualKey !== lastDrinkVisualKey) {
@@ -650,7 +780,7 @@ export default function BobaScene(props: BobaSceneProps) {
       drink.rotation.z = celebrating ? Math.sin(elapsed * 4.2) * 0.035 : 0;
       setObjectOpacity(drink, drinkOpacity);
 
-      receiptDisplay.group.visible = receiptVisible;
+      receiptDisplay.group.visible = receiptVisible && !loadingActive;
       if (receiptVisible) {
         camera.getWorldDirection(receiptForward);
         receiptFocusedPosition.copy(camera.position).addScaledVector(receiptForward, 0.82);
@@ -665,8 +795,8 @@ export default function BobaScene(props: BobaSceneProps) {
         receiptDisplay.setOpacity(THREE.MathUtils.lerp(0.92, 1, Math.max(receiptFocusAmount, gazeProgress)));
       }
 
-      const showCashierPanels = state.experience === "cashier" && ["ordering", "confirming", "paying", "serving"].includes(state.phase);
-      const showKioskSubtitle = state.experience === "kiosk" && state.phase === "kiosk";
+      const showCashierPanels = !loadingActive && state.experience === "cashier" && ["ordering", "confirming", "paying", "serving"].includes(state.phase);
+      const showKioskSubtitle = !loadingActive && state.experience === "kiosk" && state.phase === "kiosk";
       npcBubble.sprite.visible = showCashierPanels && Boolean(state.npcLine);
       if (npcBubble.sprite.visible && state.npcLine !== lastNpcText) {
         lastNpcText = state.npcLine;
@@ -705,6 +835,10 @@ export default function BobaScene(props: BobaSceneProps) {
       });
 
       renderer.render(scene, camera);
+      if (!firstSceneFrameSettled && loadStages.world >= 1 && loadStages.cashier >= 1 && loadStages.collider >= 1) {
+        firstSceneFrameSettled = true;
+        setLoadStage("firstFrame", 1, "Ready");
+      }
     });
 
     (window as typeof window & { __bobaScene?: unknown }).__bobaScene = {
@@ -718,7 +852,9 @@ export default function BobaScene(props: BobaSceneProps) {
     };
 
     return () => {
+      disposed = true;
       renderer.setAnimationLoop(null);
+      warmupTimers.forEach((timer) => window.clearInterval(timer));
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKeyDown);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
@@ -738,6 +874,7 @@ export default function BobaScene(props: BobaSceneProps) {
       confetti.dispose();
       receiptDisplay.dispose();
       kiosk.dispose();
+      loadingPanel.dispose();
       renderer.dispose();
       vrButton?.remove();
       mount.removeChild(renderer.domElement);
@@ -2379,6 +2516,87 @@ function createDynamicPanelSprite(options: {
 
   update("");
   return { sprite, update };
+}
+
+function createLoadingPanelSprite() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1024;
+  canvas.height = 520;
+  const ctx = canvas.getContext("2d")!;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.name = "loading-panel";
+  sprite.renderOrder = 180;
+
+  const update = (title: string, status: string, progress: number, ready = false) => {
+    const clampedProgress = THREE.MathUtils.clamp(progress, 0, 100);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const bg = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    bg.addColorStop(0, "rgba(35, 31, 20, 0.94)");
+    bg.addColorStop(1, "rgba(62, 54, 31, 0.92)");
+    ctx.fillStyle = bg;
+    roundRect(ctx, 34, 34, canvas.width - 68, canvas.height - 68, 38);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(241, 231, 200, 0.28)";
+    ctx.lineWidth = 8;
+    ctx.stroke();
+
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "#b8c98f";
+    ctx.font = "900 42px system-ui, sans-serif";
+    ctx.fillText(title, 90, 104);
+
+    ctx.fillStyle = "rgba(255, 245, 216, 0.82)";
+    ctx.font = "780 34px system-ui, sans-serif";
+    wrapCanvasText(ctx, status, 820, 2).forEach((line, index) => {
+      ctx.fillText(line, 90, 184 + index * 42);
+    });
+
+    ctx.fillStyle = "rgba(255, 245, 216, 0.18)";
+    roundRect(ctx, 90, 316, 780, 34, 17);
+    ctx.fill();
+    ctx.fillStyle = "#b8c98f";
+    roundRect(ctx, 90, 316, 780 * (clampedProgress / 100), 34, 17);
+    ctx.fill();
+
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#fff5d8";
+    ctx.font = "900 40px system-ui, sans-serif";
+    ctx.fillText(`${Math.round(clampedProgress)}%`, 920, 308);
+
+    if (ready) {
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#b8c98f";
+      roundRect(ctx, 668, 420, 220, 58, 18);
+      ctx.fill();
+      ctx.fillStyle = "#302d18";
+      ctx.font = "900 30px system-ui, sans-serif";
+      ctx.fillText("Enter", 778, 434);
+      ctx.fillStyle = "rgba(255, 245, 216, 0.76)";
+      ctx.font = "760 24px system-ui, sans-serif";
+      ctx.fillText("Select to begin", 778, 478);
+    }
+
+    texture.needsUpdate = true;
+  };
+
+  update("Boba Tea Shop", "Loading scene...", 0);
+  return {
+    sprite,
+    update,
+    dispose() {
+      texture.dispose();
+      material.dispose();
+    },
+  };
 }
 
 function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {

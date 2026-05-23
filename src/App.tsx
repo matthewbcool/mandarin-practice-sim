@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import BobaScene, { COUNTER_CASHIER_POSE, type FocusTarget } from "./three/BobaScene";
+import BobaScene, { COUNTER_CASHIER_POSE, type FocusTarget, type SceneLoadProgress } from "./three/BobaScene";
 import { BrowserMandarinVoiceProvider } from "./voice/browserMandarinVoice";
 import { GeminiLiveVoiceProvider } from "./voice/geminiLiveVoice";
 import { geminiLivePlan } from "./voice/geminiLivePlan";
@@ -51,11 +51,42 @@ type RuntimeStatus = {
   geminiEnabled: boolean;
   reason?: string;
 };
+type ScenarioId = "boba-tea-shop";
+type ScenarioCard = {
+  id: ScenarioId;
+  title: string;
+  kicker: string;
+  description: string;
+  image: string;
+  imageWidth: number;
+  imageHeight: number;
+  loadingStatus: string;
+};
+type ScenarioLoadState = {
+  scenarioId: ScenarioId;
+  progress: number;
+  status: string;
+  ready: boolean;
+};
 type KioskSpeechCue = {
   title: string;
   text: string;
   speakText?: string;
 };
+
+const scenarioCards: ScenarioCard[] = [
+  {
+    id: "boba-tea-shop",
+    title: "Boba Tea Shop",
+    kicker: "Boba Tea Shop",
+    description: "Practice ordering bubble tea at the self-ordering kiosk.",
+    image: "/assets/scenarios/boba-tea-shop.jpg",
+    imageWidth: 960,
+    imageHeight: 540,
+    loadingStatus: "Loading Boba Tea Shop...",
+  },
+];
+const defaultScenarioId: ScenarioId = "boba-tea-shop";
 
 function byId<T extends { id: string }>(items: T[], id: string): T {
   return items.find((item) => item.id === id) ?? items[0];
@@ -274,7 +305,14 @@ export default function App() {
   const [pressure, setPressure] = useState(0);
   const [interactionTick, setInteractionTick] = useState(0);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>({ loaded: false, geminiEnabled: false });
-  const [sceneReady, setSceneReady] = useState(false);
+  const [focusedScenarioId, setFocusedScenarioId] = useState<ScenarioId>(defaultScenarioId);
+  const [sceneLoadState, setSceneLoadState] = useState<ScenarioLoadState>({
+    scenarioId: defaultScenarioId,
+    progress: 0,
+    status: scenarioCards[0].loadingStatus,
+    ready: false,
+  });
+  const [scenarioEntered, setScenarioEntered] = useState(false);
   const [introComplete, setIntroComplete] = useState(false);
   const [introIndex, setIntroIndex] = useState(0);
   const [kioskOpen, setKioskOpen] = useState(false);
@@ -288,7 +326,14 @@ export default function App() {
 
   const voice = runtimeStatus.geminiEnabled ? geminiVoice : browserVoice;
   const experience: ExperienceMode = runtimeStatus.loaded && runtimeStatus.geminiEnabled ? "cashier" : "kiosk";
-  const introReady = runtimeStatus.loaded && sceneReady;
+  const focusedScenario = scenarioCards.find((scenario) => scenario.id === focusedScenarioId) ?? scenarioCards[0];
+  const loadingReady = runtimeStatus.loaded && sceneLoadState.ready && sceneLoadState.scenarioId === focusedScenarioId;
+  const loadingProgress = Math.round(
+    clamp((runtimeStatus.loaded ? 0.1 : 0) * 100 + sceneLoadState.progress * 90, 0, loadingReady ? 100 : 99),
+  );
+  const loadingStatus = runtimeStatus.loaded ? (loadingReady ? "" : sceneLoadState.status || focusedScenario.loadingStatus) : "Checking voice mode...";
+  const showLoadingGate = !scenarioEntered;
+  const introReady = loadingReady;
 
   useEffect(() => {
     let cancelled = false;
@@ -316,6 +361,39 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  const focusScenario = useCallback(
+    (scenarioId: ScenarioId) => {
+      if (scenarioId === focusedScenarioId) return;
+      const scenario = scenarioCards.find((item) => item.id === scenarioId) ?? scenarioCards[0];
+      setFocusedScenarioId(scenario.id);
+      setScenarioEntered(false);
+      setIntroComplete(false);
+      setIntroIndex(0);
+      setSceneLoadState({
+        scenarioId: scenario.id,
+        progress: 0,
+        status: scenario.loadingStatus,
+        ready: false,
+      });
+    },
+    [focusedScenarioId],
+  );
+
+  const handleSceneLoadProgress = useCallback((progress: SceneLoadProgress) => {
+    const scenario = scenarioCards.find((item) => item.id === progress.scenarioId) ?? scenarioCards[0];
+    setSceneLoadState({
+      scenarioId: scenario.id,
+      progress: clamp(progress.progress, 0, 1),
+      status: progress.status,
+      ready: progress.ready,
+    });
+  }, []);
+
+  const enterScenario = useCallback(() => {
+    if (!loadingReady) return;
+    setScenarioEntered(true);
+  }, [loadingReady]);
 
   useEffect(() => {
     window.localStorage.setItem(kioskLanguageStorageKey, kioskLanguage);
@@ -1093,11 +1171,13 @@ export default function App() {
 
   const liveRound = experience === "cashier" && ["ordering", "confirming", "paying", "serving"].includes(phase);
   const playerTurn = experience === "cashier" && ["ordering", "confirming"].includes(phase) && !npcSpeaking && !npcAudioActive;
-  const showSpeechFeedback = liveRound || (experience === "kiosk" && phase === "kiosk");
+  const showSpeechFeedback = !showLoadingGate && (liveRound || (experience === "kiosk" && phase === "kiosk"));
 
   return (
     <main>
       <BobaScene
+        key={focusedScenarioId}
+        scenarioId={focusedScenarioId}
         phase={phase}
         experience={experience}
         listening={listening}
@@ -1115,44 +1195,116 @@ export default function App() {
         onReceiptAdvance={advanceFromReceipt}
         onKioskAction={handleKioskAction}
         onCashierBreak={handleCashierBreak}
-        onSceneReady={() => setSceneReady(true)}
+        loadingActive={showLoadingGate}
+        loadingTitle={focusedScenario.title}
+        loadingStatus={loadingStatus}
+        loadingProgress={loadingProgress}
+        loadingReady={loadingReady}
+        onLoadingEnter={enterScenario}
+        onSceneLoadProgress={handleSceneLoadProgress}
       />
 
-      {introComplete && (
+      {introComplete && !showLoadingGate && (
         <div
           className={`reticle ${focusTarget !== "none" ? "reticle--active" : ""} ${playerTurn ? "reticle--ready" : ""} ${listening ? "reticle--listening" : ""}`}
         />
       )}
 
-      <section className={`hud hud--top ${liveRound ? "hud--quiet" : ""}`}>
-        <div className="brand">
-          <span>珍奶快打</span>
-          <small>{experience === "kiosk" ? "自助點餐" : mode === "arcade" ? `第 ${roundIndex + 1} 關` : "自由模式"}</small>
-        </div>
-        {!liveRound && <div className="status-pill" title={experience === "kiosk" ? "Cashier voice is off. Use the kiosk to order." : geminiLivePlan.model}>
-          {runtimeStatus.loaded
-            ? experience === "cashier"
-              ? "Cashier voice"
-              : "Public Mode"
-            : "Loading"}
-        </div>}
-        {mode === "arcade" && liveRound && pressure > 0 && (
-          <div className="pressure-meter">
-            <span>後方耐心</span>
-            <div>
-              <i style={{ width: `${Math.max(8, 100 - pressure)}%` }} />
-            </div>
+      {!showLoadingGate && (
+        <section className={`hud hud--top ${liveRound ? "hud--quiet" : ""}`}>
+          <div className="brand">
+            <span>珍奶快打</span>
+            <small>{experience === "kiosk" ? "自助點餐" : mode === "arcade" ? `第 ${roundIndex + 1} 關` : "自由模式"}</small>
           </div>
-        )}
-        {experience === "cashier" && (
-          <label className="toggle">
-            <input type="checkbox" checked={autoListen} onChange={(event) => setAutoListen(event.target.checked)} />
-            <span>Gaze listen</span>
-          </label>
-        )}
-      </section>
+          {!liveRound && <div className="status-pill" title={experience === "kiosk" ? "Cashier voice is off. Use the kiosk to order." : geminiLivePlan.model}>
+            {runtimeStatus.loaded
+              ? experience === "cashier"
+                ? "Cashier voice"
+                : "Public Mode"
+              : "Loading"}
+          </div>}
+          {mode === "arcade" && liveRound && pressure > 0 && (
+            <div className="pressure-meter">
+              <span>後方耐心</span>
+              <div>
+                <i style={{ width: `${Math.max(8, 100 - pressure)}%` }} />
+              </div>
+            </div>
+          )}
+          {experience === "cashier" && (
+            <label className="toggle">
+              <input type="checkbox" checked={autoListen} onChange={(event) => setAutoListen(event.target.checked)} />
+              <span>Gaze listen</span>
+            </label>
+          )}
+        </section>
+      )}
 
-      {!introComplete && (
+      {showLoadingGate && (
+        <section className="scenario-loader" aria-live="polite">
+          <div className="scenario-shell">
+            <h1 className="sr-only">Choose a scenario</h1>
+            <div className="scenario-carousel" role="listbox" aria-label="Available scenarios">
+              <button className="scenario-nav" disabled aria-label="Previous scenario">
+                ‹
+              </button>
+              <div className="scenario-track">
+                {scenarioCards.map((scenario) => {
+                  const active = scenario.id === focusedScenarioId;
+                  return (
+                    <button
+                      key={scenario.id}
+                      className={`scenario-card ${active ? "scenario-card--active" : ""}`}
+                      role="option"
+                      aria-selected={active}
+                      onFocus={() => focusScenario(scenario.id)}
+                      onMouseEnter={() => focusScenario(scenario.id)}
+                      onClick={() => focusScenario(scenario.id)}
+                    >
+                      <span className="scenario-shot">
+                        <img src={scenario.image} alt="" width={scenario.imageWidth} height={scenario.imageHeight} decoding="async" />
+                      </span>
+                      <span className="scenario-copy">
+                        <strong>{scenario.kicker}</strong>
+                        <span>{scenario.description}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <button className="scenario-nav" disabled aria-label="Next scenario">
+                ›
+              </button>
+            </div>
+            {loadingReady ? (
+              <div className="scenario-actions">
+                <button onClick={enterScenario}>
+                  Enter
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="scenario-load-meta">
+                  <span>{loadingProgress}%</span>
+                </div>
+                <div
+                  className="loading-progress"
+                  role="progressbar"
+                  aria-label={`Loading ${focusedScenario.title}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={loadingProgress}
+                >
+                  <i style={{ width: `${loadingProgress}%` }} />
+                </div>
+                {loadingStatus && <p>{loadingStatus}</p>}
+              </>
+            )}
+          </div>
+        </section>
+      )}
+
+      {!showLoadingGate && !introComplete && (
         <section className="intro-loader" aria-live="polite">
           <div className="intro-art" aria-hidden="true">
             <span>{introIndex + 1}</span>
@@ -1207,7 +1359,7 @@ export default function App() {
         </section>
       )}
 
-      {partial && <section className="partial">「{partial}」</section>}
+      {!showLoadingGate && partial && <section className="partial">「{partial}」</section>}
 
       {showSpeechFeedback && speechFeedbackText && (
         <section className={`speech-feedback ${listening ? "speech-feedback--listening" : ""}`} aria-live="polite">
@@ -1216,7 +1368,7 @@ export default function App() {
         </section>
       )}
 
-      {["ordering", "confirming"].includes(phase) && (
+      {!showLoadingGate && ["ordering", "confirming"].includes(phase) && (
         <section className={`controls ${playerTurn ? "controls--ready" : ""}`}>
           <button className={listening ? "danger" : ""} onClick={() => startListening("manual")} disabled={!voice.isListeningSupported()}>
             {listening ? "Listening..." : npcSpeaking || npcAudioActive ? "Interrupt" : "Speak"}
