@@ -21,7 +21,7 @@ Language practice works best when it has a place, a task, and a little social pr
 
 ## Product Direction
 
-This repo should evolve from one boba demo into a reusable language-simulation runtime.
+This repo is now organized around a scenario registry. The boba shop is still the proving ground, but its metadata, copy, task hooks, kiosk labels, scene assets, menu boards, parser hooks, objectives, and scoring hooks live under `src/scenarios/bobaTeaShop/` instead of being owned by the top-level app.
 
 Scenario-specific data should become swappable over time:
 
@@ -33,6 +33,33 @@ Scenario-specific data should become swappable over time:
 - world splats, colliders, characters, and ambient audio
 
 The boba shop remains the proving ground. Avoid broad abstraction for its own sake; extract scenario data when it helps ship the next environment or removes an obvious hardcoded assumption.
+
+## Scenario System
+
+Scenarios are registered in `src/scenarios/registry.ts`. Each scenario exports a `ScenarioDefinition` from `src/scenarios/<scenarioId>/index.ts`.
+
+A scenario definition owns:
+
+- main-menu card metadata
+- locale and intro copy
+- app branding and runtime dialogue lines
+- world, collider, character, receipt, and menu-board scene config
+- task helpers for describing orders, totals, missing fields, objective matching, and defaults
+- parser hooks for deterministic speech parsing and order merging
+- free-flow prompt/advice hooks
+- arcade objectives
+- kiosk labels, option translations, pronunciation hints, storage keys, and receipt building
+- scoring/share-text hooks
+
+To add a scenario:
+
+1. Create `src/scenarios/newScenario/`.
+2. Export a complete `ScenarioDefinition`.
+3. Add it to `scenarios` in `src/scenarios/registry.ts`.
+4. Add any assets under `public/assets/`.
+5. Run `npm run build`.
+
+The top-level app consumes the active scenario from the registry. Avoid adding new scenario-specific branches in `src/App.tsx` or `src/three/BobaScene.tsx` unless the runtime needs a new extension point.
 
 ## Runtime Loop
 
@@ -136,6 +163,7 @@ VITE_GEMINI_SYSTEM_VOICE='Kore'
 └── src/
     ├── App.tsx               # Main simulator state and conversation flow
     ├── game/                 # Current boba scenario data, parser, rounds, scoring
+    ├── scenarios/            # Scenario registry and scenario definitions
     ├── three/BobaScene.tsx   # Three.js scene, gaze focus, panels, receipt display
     ├── voice/                # Gemini, browser, NVIDIA, radio, and success cue code
     └── styles/app.css
@@ -143,6 +171,9 @@ VITE_GEMINI_SYSTEM_VOICE='Kore'
 
 Important files:
 
+- `src/scenarios/types.ts`: scenario contract used by the app and scene.
+- `src/scenarios/registry.ts`: list of available scenarios and the default scenario.
+- `src/scenarios/bobaTeaShop/`: current boba scenario definition.
 - `src/game/menu.ts`: boba vocabulary, menu options, order formatting.
 - `src/game/kiosk.ts`: offline kiosk cart, receipt, and public-mode state helpers.
 - `src/game/parser.ts`: deterministic Mandarin order parser.
@@ -190,7 +221,7 @@ Helper scripts live in `scripts/brev`.
 
 ## Known Gaps
 
-- The implementation is still boba-specific in several files.
-- Scenario configuration is not fully extracted yet.
+- The scenario contract still uses the current boba-shaped `Order` model; the next non-boba scenario should drive a more generic task-state model if needed.
+- Some reusable boba helpers still live in `src/game/` as compatibility modules for the extracted boba scenario.
 - Automated smoke tests are not wired into the repo.
 - Desktop browser is the main development loop; WebXR is available for immersive testing.

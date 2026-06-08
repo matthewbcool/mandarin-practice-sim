@@ -1,7 +1,7 @@
-import { drinks, iceLevels, missingRequiredFields, orderTotal, sizes, sweetnessLevels, toppings } from "./menu";
 import type { ParsedUtterance, SideIntent } from "./parser";
 import type { DialogueTurn, GameMode, GamePhase, MenuOption, Order } from "./types";
 import { geminiLivePlan } from "../voice/geminiLivePlan";
+import type { ScenarioDefinition } from "../scenarios/types";
 
 type PendingPrompt = "none" | "drink" | "size" | "sweetness" | "ice" | "confirm";
 
@@ -32,6 +32,7 @@ export type GeminiIntentResult = {
 };
 
 export async function interpretFreeFlowUtterance(args: {
+  scenario: ScenarioDefinition;
   text: string;
   mode: GameMode;
   phase: GamePhase;
@@ -59,17 +60,17 @@ export async function interpretFreeFlowUtterance(args: {
         pendingSuggestion: serializePatch(args.pendingSuggestion ?? {}),
         localParsed: serializeParsed(args.localParsed),
         orderAfterLocalParse: serializeOrder(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch)),
-        missingFieldsBefore: missingRequiredFields(args.currentOrder, args.targetOrder),
-        missingFieldsAfterLocalParse: missingRequiredFields(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch), args.targetOrder),
-        totalAfterLocalParse: orderTotal(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch)),
+        missingFieldsBefore: args.scenario.task.missingRequiredFields(args.currentOrder, args.targetOrder),
+        missingFieldsAfterLocalParse: args.scenario.task.missingRequiredFields(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch), args.targetOrder),
+        totalAfterLocalParse: args.scenario.task.orderTotal(mergeOrderPreview(args.currentOrder, args.localParsed.orderPatch)),
         recentTurns: serializeTurns(args.recentTurns ?? []),
-        menu: serializeMenu(),
+        menu: serializeMenu(args.scenario),
       }),
     }).finally(() => window.clearTimeout(timeout));
 
     if (!response.ok) throw new Error(`Gemini intent returned ${response.status}`);
     const payload = (await response.json()) as GeminiIntentPayload;
-    const geminiPatch = hydratePatch(payload.orderPatch, args.text);
+    const geminiPatch = hydratePatch(payload.orderPatch, args.text, args.scenario);
     const orderPatch = mergePatches(args.localParsed.orderPatch, geminiPatch);
     const hasOrderPatch = Object.keys(orderPatch).length > 0;
     const sideIntent = hasOrderPatch ? undefined : hydrateSideIntent(payload.sideIntent) ?? args.localParsed.sideIntent;
@@ -141,7 +142,8 @@ function serializeTurns(turns: DialogueTurn[]) {
     }));
 }
 
-function serializeMenu() {
+function serializeMenu(scenario: ScenarioDefinition) {
+  const { drinks, sizes, sweetnessLevels, iceLevels, toppings } = scenario.menu;
   return {
     drinks: drinks.map(serializeOption),
     sizes: sizes.map(serializeOption),
@@ -171,12 +173,13 @@ function mergeOrderPreview(current: Order, patch: Partial<Order>): Order {
   };
 }
 
-function hydratePatch(raw: GeminiIntentPayload["orderPatch"], transcript: string): Partial<Order> {
+function hydratePatch(raw: GeminiIntentPayload["orderPatch"], transcript: string, scenario: ScenarioDefinition): Partial<Order> {
   if (!raw) return {};
   const patch: Partial<Order> = {};
   if (typeof raw.quantity === "number" && Number.isFinite(raw.quantity) && raw.quantity > 0) {
     patch.quantity = Math.min(4, Math.max(1, Math.round(raw.quantity)));
   }
+  const { drinks, sizes, sweetnessLevels, iceLevels, toppings } = scenario.menu;
   const drink = findById(drinks, raw.drinkId);
   const size = findById(sizes, raw.sizeId);
   const sweetness = findById(sweetnessLevels, raw.sweetnessId);

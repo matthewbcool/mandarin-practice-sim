@@ -41,16 +41,16 @@ export function buildReceipt(params: {
   };
 }
 
-export function loadReceipts(): Receipt[] {
+export function loadReceipts(storageKey = "boba-receipts"): Receipt[] {
   try {
-    return JSON.parse(localStorage.getItem("boba-receipts") ?? "[]") as Receipt[];
+    return JSON.parse(localStorage.getItem(storageKey) ?? "[]") as Receipt[];
   } catch {
     return [];
   }
 }
 
-export function saveReceipt(receipt: Receipt): Receipt[] {
-  const receipts = [receipt, ...loadReceipts()].slice(0, 40);
-  localStorage.setItem("boba-receipts", JSON.stringify(receipts));
+export function saveReceipt(receipt: Receipt, storageKey = "boba-receipts"): Receipt[] {
+  const receipts = [receipt, ...loadReceipts(storageKey)].slice(0, 40);
+  localStorage.setItem(storageKey, JSON.stringify(receipts));
   return receipts;
 }

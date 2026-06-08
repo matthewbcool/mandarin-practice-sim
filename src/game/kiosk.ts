@@ -75,19 +75,19 @@ export function buildKioskReceipt(cart: KioskCartItem[]): KioskReceipt {
   };
 }
 
-export function loadKioskReceipts(): KioskReceipt[] {
+export function loadKioskReceipts(storageKey = kioskReceiptStorageKey): KioskReceipt[] {
   if (typeof window === "undefined") return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(kioskReceiptStorageKey) || "[]");
+    const parsed = JSON.parse(window.localStorage.getItem(storageKey) || "[]");
     return Array.isArray(parsed) ? parsed.slice(0, 12) : [];
   } catch {
     return [];
   }
 }
 
-export function saveKioskReceipt(receipt: KioskReceipt): KioskReceipt[] {
-  const next = [receipt, ...loadKioskReceipts()].slice(0, 12);
-  window.localStorage.setItem(kioskReceiptStorageKey, JSON.stringify(next));
+export function saveKioskReceipt(receipt: KioskReceipt, storageKey = kioskReceiptStorageKey): KioskReceipt[] {
+  const next = [receipt, ...loadKioskReceipts(storageKey)].slice(0, 12);
+  window.localStorage.setItem(storageKey, JSON.stringify(next));
   return next;
 }
 
